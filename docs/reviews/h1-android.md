@@ -9,7 +9,7 @@ El cliente usa buffers de 64 KiB, tamaños `Long`, DNS dedicado y el hostname fi
 Desde `apps/android`, con JDK 21 y SDK 36 locales y `source /workspace/toolchains/env.sh`:
 
 ```sh
-./gradlew --no-daemon --max-workers=4 :app:checkDebugAarMetadata :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --write-locks
+./gradlew --no-daemon --max-workers=4 :app:checkDebugAarMetadata :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 ```
 
 La primera repetición falló en `checkDebugAarMetadata`: Dependency Insight confirmó que `kotlin-stdlib-common:2.3.21` aparecía únicamente por la restricción del lock y no era parte del grafo resuelto. Se retiró esa sola entrada obsoleta. Luego pasó la matriz completa sin `--write-locks`; tras `:app:clean`, la misma matriz terminó de nuevo con éxito: `checkDebugAarMetadata`, `testDebugUnitTest` (9 pruebas, incluidas 1 interoperabilidad con `ft-core`), `lintDebug` y `assembleDebug`. El APK recién generado contiene `libandroidx.graphics.path.so` en `armeabi-v7a`, `arm64-v8a`, `x86` y `x86_64`. Lint advierte sobre el TrustManager personalizado: comprueba huella y delega PKIX a la plataforma; no se suprime el aviso. El JAR de Gradle Wrapper coincide byte por byte con `gradle/wrapper/gradle-wrapper.jar` del repositorio oficial Gradle, tag `v8.13.0` (SHA-256 `81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f`).
