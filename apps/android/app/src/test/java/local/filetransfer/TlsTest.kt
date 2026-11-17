@@ -57,6 +57,21 @@ class TlsTest {
             val out = java.io.ByteArrayOutputStream(); assertEquals(hash, c.downloadContent(id, bytes.size.toLong(), out) {}); assertArrayEquals(bytes, out.toByteArray())
         }
     }
+    @Test fun pairingErrorCodesArePreservedOverPinnedTls() {
+        val cert = certificate("file-transfer.local"); val pin = MessageDigest.getInstance("SHA-256").digest(cert.certificate.encoded).hex()
+        MockWebServer().use { server ->
+            server.useHttps(HandshakeCertificates.Builder().heldCertificate(cert).build().sslSocketFactory()); server.start()
+            val client = ProtocolClient("127.0.0.1", server.port, pin, "22222222-2222-4222-8222-222222222222")
+            val descriptor = Descriptor("127.0.0.1", server.port, "11111111-1111-4111-8111-111111111111", pin, "A".repeat(43))
+            for (code in listOf("pairing_denied", "already_paired")) {
+                server.enqueue(MockResponse.Builder().code(if (code == "pairing_denied") 401 else 409).body("""{"error":{"code":"$code"}}""").build())
+                val error = runCatching { client.pair(descriptor, "Android") }.exceptionOrNull()
+                assertTrue(error is ProtocolException)
+                assertEquals(code, (error as ProtocolException).code)
+            }
+            assertEquals(2, server.requestCount)
+        }
+    }
     @Test fun validCertAndPin() = runCase("file-transfer.local", succeeds = true)
     @Test fun wrongPin() = runCase("file-transfer.local", wrongPin = true)
     @Test fun wrongHostname() = runCase("other.local")

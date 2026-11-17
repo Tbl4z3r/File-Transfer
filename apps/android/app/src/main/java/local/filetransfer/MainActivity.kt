@@ -1,6 +1,8 @@
 package local.filetransfer
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.net.Uri
@@ -11,11 +13,15 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import java.io.File
@@ -35,8 +41,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             var pair by remember { mutableStateOf(runCatching { store.load() }.getOrNull()) }
             var descriptor by remember { mutableStateOf("") }
-            var deviceName by remember { mutableStateOf("Android personal") }
-            var message by remember { mutableStateOf("Introduce el descriptor mostrado en el PC.") }
+            var deviceName by rememberSaveable { mutableStateOf("Android personal") }
+            var message by remember { mutableStateOf("Escanea el QR mostrado en tu PC para conectar.") }
             var busy by remember { mutableStateOf(false) }
             var progress by remember { mutableStateOf("") }
             var address by remember { mutableStateOf(pair?.host ?: "") }
@@ -59,6 +65,44 @@ class MainActivity : ComponentActivity() {
             }
             fun connected(): ProtocolClient { val p = requireNotNull(pair); return ProtocolClient(p.host, p.port, p.pin, p.deviceId, p.credential).also { client = it } }
             fun report(n: Long, total: Long) { runOnUiThread { progress = "$n / $total bytes" } }
+            fun startPair(raw: String) {
+                val name = deviceName
+                post("pair") {
+                    val p = try {
+                        withValidatedDescriptor(raw) { d -> ProtocolClient(d.host, d.port, d.pin, store.deviceId()).pair(d, name) }
+                    } catch (_: InvalidDescriptor) {
+                        runOnUiThread { message = "El código o descriptor no es válido. Genera otro QR en el PC o usa el JSON manual." }
+                        return@post
+                    } catch (error: ProtocolException) {
+                        val explanation = when (error.code) {
+                            "pairing_denied" -> "El QR ha caducado o ya se usó. Genera otro en el PC e inténtalo de nuevo."
+                            "already_paired" -> "Este teléfono ya está emparejado. Revoca el emparejamiento anterior en el PC y genera otro QR."
+                            else -> throw error
+                        }
+                        runOnUiThread { message = explanation }
+                        return@post
+                    }
+                    store.save(p)
+                    runOnUiThread { pair = p; address = p.host; portText = p.port.toString(); descriptor = ""; message = "Dispositivo emparejado." }
+                }
+            }
+            val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
+                val raw = result.contents
+                if (raw == null) message = "Escaneo cancelado o cámara no disponible. Inténtalo de nuevo o introduce el JSON manualmente."
+                else if (!busy && pair == null) startPair(raw)
+            }
+            fun launchScanner() {
+                runCatching {
+                    scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                        .setCaptureActivity(QrCaptureActivity::class.java).setOrientationLocked(true)
+                        .setBeepEnabled(false).setBarcodeImageEnabled(false)
+                        .setPrompt("Apunta al QR mostrado en el PC"))
+                }.onFailure { message = "No se pudo iniciar la cámara. Inténtalo de nuevo o introduce el JSON manualmente." }
+            }
+            val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+                if (granted && pair == null && !busy) launchScanner()
+                else if (!granted) message = "No se concedió acceso a la cámara. Puedes permitirlo en Ajustes o introducir el JSON manualmente."
+            }
             val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
                 val uri = result.data?.data
                 if (result.resultCode == Activity.RESULT_OK && uri != null) post("choose_folder") {
@@ -91,10 +135,17 @@ class MainActivity : ComponentActivity() {
                     message = "Diagnóstico copiado; no incluye credenciales ni rutas de archivos."
                 }) { Text("Copiar diagnóstico") } }
                 if (pair == null) {
-                    Text("Copia el descriptor desde el PC y verifica la huella por un canal físico.")
+                    Text("Escanea el QR que muestra tu PC o copia su descriptor JSON.")
+                    Button(enabled = !busy, onClick = {
+                        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) {
+                            message = "No hay cámara disponible. Introduce el JSON manualmente."
+                        } else if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                            launchScanner()
+                        } else cameraPermission.launch(Manifest.permission.CAMERA)
+                    }) { Text("Escanear QR del PC") }
                     OutlinedTextField(descriptor, { descriptor = it }, label = { Text("Descriptor JSON") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(deviceName, { deviceName = it }, label = { Text("Nombre de este dispositivo") })
-                    Button(enabled = !busy, onClick = { val raw = descriptor; post("pair") { val d = Descriptor.parse(raw); val p = ProtocolClient(d.host, d.port, d.pin, store.deviceId()).pair(d, deviceName); store.save(p); runOnUiThread { pair = p; address = p.host; portText = p.port.toString(); descriptor = ""; message = "Dispositivo emparejado." } } }) { Text("Emparejar") }
+                    Button(enabled = !busy, onClick = { startPair(descriptor) }) { Text("Emparejar con JSON") }
                 } else {
                     Text("PC emparejado: ${pair!!.host}:${pair!!.port}")
                     OutlinedTextField(address, { address = it }, label = { Text("IP del PC") }, enabled = !busy)

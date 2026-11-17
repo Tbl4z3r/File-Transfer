@@ -29,6 +29,7 @@ object TransferDiagnostics {
     fun userMessage(stage: String, error: Exception, cancelled: Boolean): String {
         if (error is ReceiveStorageException) return error.message ?: "No se pudo guardar el archivo. Elige otra carpeta."
         if (cancelled) return "Transferencia cancelada."
+        if (stage == "pair") return "No se pudo emparejar. Comprueba la conexión o genera otro QR en el PC si ha caducado; también puedes usar el JSON manual."
         if (stage == "publish") return "Se recibió el archivo, pero no se pudo guardar en el destino. Comprueba el espacio y vuelve a elegir la carpeta."
         if (error is SecurityException) return "Se perdió un permiso de acceso. Vuelve a elegir el archivo o la carpeta."
         return "No se pudo completar la operación. Comprueba la conexión y vuelve a intentarlo. Puedes copiar el diagnóstico para revisar el fallo."
