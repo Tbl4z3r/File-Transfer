@@ -9,6 +9,7 @@ Estados: pendiente → lista → en curso → en revisión → cambios solicitad
 | H1-WINDOWS | Servicio TLS y cliente Windows | Sol + cierre Luna | integrada en prueba; CI Windows pendiente | H0-ARCH, H0-COMPAT |
 | H1-ANDROID | Cliente Android y flujo manual | Terra + cierre Luna | integrada en prueba; APK y pruebas JVM verificadas | H0-ARCH, H0-COMPAT |
 | H1-INTEGRATION | Revisar, validar y documentar transferencia | GPT-6.1 Sol | en curso | Ambas implementaciones |
+| ANDROID-RX | Corregir publicación Android, carpeta SAF y diagnósticos | Sol + Luna | en revisión | Prueba Redmi Note 14 5G |
 | H2–H5 | Descubrimiento, uso cotidiano, recuperación y distribución | por asignar | pendiente | H1 validado |
 
 La revisión del autor no equivale a aprobación. Las verificaciones en dispositivos físicos y mediciones de la LAN requieren acceso real al Windows y al J4+.

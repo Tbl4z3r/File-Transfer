@@ -1,5 +1,12 @@
 # Cambios
 
+## Android 0.1.1 en desarrollo — rama prueba
+
+- Sustituye el guardado por hard link, que fallaba después de recibir todos los bytes en la prueba móvil, por creación exclusiva y copia verificada.
+- Permite elegir y recordar carpeta de recepción con el selector Android, conservando la bandeja privada como alternativa.
+- Añade Copiar diagnóstico y el tag local FileTransfer de logcat, con etapa/tipos de error y sin credenciales/rutas.
+- Mantiene el protocolo v1 y el programa Windows actual.
+
 ## 0.1.0 en desarrollo — rama prueba
 
 - Base Windows x64/Tauri y Android API28+/Compose para conexión manual en LAN.

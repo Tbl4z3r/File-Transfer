@@ -26,3 +26,7 @@ No usar tokens incrustados, keystores de distribución o certificados privados e
 2. Seguir el reporte de revisión e interoperabilidad. Una compilación y un test JVM no sustituyen ejecución Android real.
 3. Instalar en Windows y J4+, comprobar ABI con adb, transferir en ambos sentidos y registrar integridad/tiempo/MiB/s. Probar confirmación, revocación, corte, colisión y permisos.
 4. Solo después de cumplir aceptación, promover a `main` por PR. Empezar H2 de descubrimiento tras estabilizar H1, sin mezclar reanudación o distribución aún.
+
+## Prueba móvil y corrección de recepción
+
+El usuario comprobó conexión en Redmi Note 14 5G; no en J4+. Reportó recepción móvil cancelada después de 1351724/1351724 bytes: la captura señala publicación local con Files.createLink. La candidata Android 0.1.1 elimina esa dependencia, permite elegir carpeta SAF y añade Copiar diagnóstico/logcat FileTransfer. Ver ADR002 y docs/TRY-PRUEBA.md para pruebas en dispositivo. No se atribuye un errno/causa exacta a la captura ni se afirma resuelto en el Redmi sin volver a ejecutarlo allí. Windows y protocolo remoto no requieren cambio por este arreglo.

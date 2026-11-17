@@ -48,9 +48,15 @@ class CoreInteropTest {
             val offered = command("offer", "peer_id" to id, "source" to source.path)
             val transfer = c.offers().single(); assertEquals(offered.getString("transfer_id"), transfer.id)
             assertEquals("ready", c.acceptDownload(transfer.id).state)
-            val output = java.io.ByteArrayOutputStream()
-            val receivedHash = c.downloadContent(transfer.id, transfer.size, output) {}
-            assertEquals(expected, receivedHash); assertArrayEquals(bytes, output.toByteArray())
+            val partial = File(root, "download.part")
+            val receivedHash = partial.outputStream().use { output -> c.downloadContent(transfer.id, transfer.size, output) {} }
+            assertEquals(expected, receivedHash)
+            // Exercise the actual publication code too: transport success alone missed the Android hardlink failure.
+            val received = PrivateInboxPublisher.publish(partial, inbox, "muestra.bin", transfer.size, receivedHash)
+            assertEquals("muestra (1).bin", received.name)
+            assertArrayEquals(bytes, received.readBytes())
+            assertArrayEquals(bytes, File(inbox, "muestra.bin").readBytes())
+            assertTrue(partial.delete())
             var state = c.status(transfer.id); val limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
             while (state.state == "streaming" && System.nanoTime() < limit) { Thread.sleep(100); state = c.status(transfer.id) }
             assertEquals("awaiting_verification", state.state); assertEquals(receivedHash, state.sha256)
