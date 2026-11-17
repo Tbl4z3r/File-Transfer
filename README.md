@@ -2,7 +2,7 @@
 
 Aplicación personal para transferir archivos entre Windows y Android por la red local, con TLS, emparejamiento verificable y sin cuentas ni servicios externos para transferir.
 
-**Estado: versión de desarrollo en `prueba`.** Incluye conexión manual, un archivo por transferencia en ambos sentidos, autorización explícita, progreso, cancelación, revocación y verificación SHA-256. Android permite elegir una carpeta de recepción y copiar diagnósticos de errores. El núcleo y el cliente Kotlin se han probado juntos mediante TLS real en Linux/JVM. Esto todavía no acredita funcionamiento en Windows y en el J4+ del usuario ni constituye una distribución estable.
+**Estado: versión de desarrollo en `prueba`.** Incluye conexión por QR o entrada manual, un archivo por transferencia en ambos sentidos, autorización explícita, progreso, cancelación, revocación y verificación SHA-256. Android permite elegir una carpeta de recepción y copiar diagnósticos de errores. El núcleo y el cliente Kotlin se han probado juntos mediante TLS real en Linux/JVM. Esto todavía no acredita funcionamiento en Windows y en el J4+ del usuario ni constituye una distribución estable.
 
 ## Ramas
 
@@ -29,6 +29,6 @@ CI comprueba el protocolo, núcleo Linux, interfaz y shell Windows, APK/lint/pru
 
 ## Límites actuales
 
-Un archivo por operación; reintentar desde cero tras un corte. Mantener Android abierto durante la transferencia. Pendientes mDNS/QR, lotes, recuperación, distribución final y pruebas físicas de Windows 10 22H2/Windows 11 y Android 9/J4+. No hay telemetría ni Google Play Services.
+Un archivo por operación; reintentar desde cero tras un corte. Mantener Android abierto durante la transferencia. Pendientes mDNS, lotes, recuperación, distribución final y pruebas físicas de Windows 10 22H2/Windows 11 y Android 9/J4+. No hay telemetría ni Google Play Services.
 
 [Continuidad](docs/CONTINUITY.md) · [Tablero](docs/tasks/BOARD.md) · [Alcance original](docs/project-brief.es.md)

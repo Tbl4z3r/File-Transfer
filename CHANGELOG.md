@@ -1,5 +1,12 @@
 # Cambios
 
+## Windows 0.1.1 / Android 0.1.2 en desarrollo — QR
+
+- Windows muestra QR local del descriptor v1, con vencimiento de 120 s y copia manual opcional.
+- Android solicita permiso de cámara al escanear y empareja sin copiar JSON, sin Google Play Services ni modelos descargados.
+- Rechaza QR ajenos/malformados antes de conectar y muestra una explicación útil si el QR venció o el móvil ya figura emparejado.
+- Mantiene TLS/pin y credenciales revocables, recepción con carpeta elegida y diagnósticos de 0.1.1.
+
 ## Android 0.1.1 en desarrollo — rama prueba
 
 - Sustituye el guardado por hard link, que fallaba después de recibir todos los bytes en la prueba móvil, por creación exclusiva y copia verificada.

@@ -30,3 +30,7 @@ No usar tokens incrustados, keystores de distribución o certificados privados e
 ## Prueba móvil y corrección de recepción
 
 El usuario comprobó conexión en Redmi Note 14 5G; no en J4+. Reportó recepción móvil cancelada después de 1351724/1351724 bytes: la captura señala publicación local con Files.createLink. La candidata Android 0.1.1 elimina esa dependencia, permite elegir carpeta SAF y añade Copiar diagnóstico/logcat FileTransfer. Ver ADR002 y docs/TRY-PRUEBA.md para pruebas en dispositivo. No se atribuye un errno/causa exacta a la captura ni se afirma resuelto en el Redmi sin volver a ejecutarlo allí. Windows y protocolo remoto no requieren cambio por este arreglo.
+
+## Conexión QR anticipada
+
+El usuario pidió QR antes de continuar la prueba J4+, porque copiar el JSON mediante WhatsApp no resulta viable allí. Windows 0.1.1 + Android 0.1.2 añaden esta parte de H2 sin mDNS ni cambios remotos: QR con JSON v1 exacto, cámara con permiso al pulsar, decoder local sin GMS y validación/TLS existentes. No se adoptó la alternativa insegura de confiar solo en IP/puerto. Ver ADR003, reportes qr-windows/qr-android y verificador cruzado de imagen. La cámara real del J4+ sigue pendiente; no dar H2 ni la compatibilidad física por completos.
