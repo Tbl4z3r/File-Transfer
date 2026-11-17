@@ -1,0 +1,82 @@
+{
+  "protocol_version": 1,
+  "notice": "Todos los IDs, hashes de certificado y tokens son datos sintéticos públicos de prueba; nunca usar en ejecución real.",
+  "sizes": [
+    {"value":"0","valid":true},
+    {"value":"3","valid":true},
+    {"value":"4294967297","valid":true},
+    {"value":"1099511627776","valid":true},
+    {"value":"1099511627777","valid":false},
+    {"value":"01","valid":false},
+    {"value":"-1","valid":false},
+    {"value":"1.0","valid":false},
+    {"value":"1e3","valid":false},
+    {"value":" 3","valid":false},
+    {"value":3,"valid":false},
+    {"value":null,"valid":false}
+  ],
+  "names": [
+    {"value":"prueba.txt","valid":true},
+    {"value":"vídeo familiar.mp4","valid":true},
+    {"value":".foto","valid":true},
+    {"value":"CONtexto.txt","valid":true},
+    {"value":"COM10.txt","valid":true},
+    {"value":"","valid":false},
+    {"value":"..","valid":false},
+    {"value":"../secreto","valid":false},
+    {"value":"C:\\archivo.txt","valid":false},
+    {"value":"foto/archivo","valid":false},
+    {"value":"foto\\archivo","valid":false},
+    {"value":"NUL.txt","valid":false},
+    {"value":"con","valid":false},
+    {"value":"COM1.tar.gz","valid":false},
+    {"value":"LPT².txt","valid":false},
+    {"value":"archivo.","valid":false},
+    {"value":"archivo ","valid":false},
+    {"value":"foto:meta","valid":false},
+    {"value":"salto\nlinea.txt","valid":false},
+    {"value":"control\u007f.txt","valid":false}
+  ],
+  "ids": [
+    {"value":"33333333-3333-4333-8333-333333333333","valid":true},
+    {"value":"abcdefab-1234-4567-abcd-123456789abc","valid":true},
+    {"value":"ABCDEFAB-1234-4567-abcd-123456789abc","valid":false},
+    {"value":"33333333-3333-1333-8333-333333333333","valid":false},
+    {"value":"33333333-3333-4333-1333-333333333333","valid":false},
+    {"value":"../transfer","valid":false}
+  ],
+  "hashes": [
+    {"bytes_hex":"","size_bytes":"0","sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"bytes_hex":"616263","size_bytes":"3","sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+    {"bytes_hex":"00ff0a0d","size_bytes":"4","sha256":"f474676c75e488e84e18f37502e7fc3e7b8850471fae5251290ff6cc4c8843bc"}
+  ],
+  "messages": {
+    "descriptor":{"v":1,"host":"192.168.1.20","port":51337,"server_device_id":"11111111-1111-4111-8111-111111111111","cert_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","pairing_token":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+    "pair_request":{"pairing_token":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","device_id":"22222222-2222-4222-8222-222222222222","device_name":"Android personal"},
+    "pair_response":{"protocol_version":1,"server_device_id":"11111111-1111-4111-8111-111111111111","server_name":"PC personal","credential":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA"},
+    "create_upload":{"file_name":"prueba.txt","size_bytes":"3"},
+    "created_upload":{"transfer_id":"33333333-3333-4333-8333-333333333333","direction":"upload","file_name":"prueba.txt","size_bytes":"3","state":"awaiting_acceptance","bytes_transferred":"0"},
+    "empty_offers":{"transfers":[]},
+    "download_offer":{"transfers":[{"transfer_id":"44444444-4444-4444-8444-444444444444","direction":"download","file_name":"prueba.txt","size_bytes":"3","state":"awaiting_acceptance","bytes_transferred":"0"}]},
+    "empty_request":{},
+    "verification_upload":{"transfer_id":"33333333-3333-4333-8333-333333333333","direction":"upload","file_name":"prueba.txt","size_bytes":"3","state":"awaiting_verification","bytes_transferred":"3","sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+    "complete_request":{"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+    "completed_download":{"transfer_id":"44444444-4444-4444-8444-444444444444","direction":"download","file_name":"prueba.txt","size_bytes":"3","state":"completed","bytes_transferred":"3","sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+    "failed_upload":{"transfer_id":"33333333-3333-4333-8333-333333333333","direction":"upload","file_name":"prueba.txt","size_bytes":"3","state":"failed","bytes_transferred":"2","error_code":"size_mismatch"},
+    "error":{"error":{"code":"integrity_mismatch","message":"Los hashes no coinciden."}}
+  },
+  "scenarios": [
+    {"case":"upload_requires_local_acceptance","expected":"PUT content before ready: 409 invalid_state; no destination published"},
+    {"case":"download_requires_android_acceptance","expected":"GET content before accept: 409 invalid_state"},
+    {"case":"different_peer","expected":"GET/content/accept/complete/cancel for another peer: 404 not_found"},
+    {"case":"wrong_pin","expected":"TLS fails before any HTTP credential or data sent"},
+    {"case":"expired_or_consumed_pair_token","expected":"401 pairing_denied; no new peer"},
+    {"case":"digest_mismatch","expected":"409 integrity_mismatch; failed; no final file"},
+    {"case":"truncated_body","expected":"failed; no final file; restart with new transfer id"},
+    {"case":"duplicate_name","expected":"exclusive numbered destination; original unchanged"},
+    {"case":"revoke_during_stream","expected":"stream cancelled and future credentials rejected; no final partial"},
+    {"case":"complete_retry","expected":"same digest after completed returns 200 completed; no second publication"},
+    {"case":"empty_file","expected":"normal state flow with zero bytes and empty SHA-256"},
+    {"case":"over_4gib_metadata","expected":"4294967297 parses exactly without allocation/truncation"}
+  ]
+}
