@@ -1,0 +1,28 @@
+# Builds and local dependencies
+node_modules/
+dist/
+target/
+.gradle/
+build/
+.kotlin/
+local.properties
+.idea/
+.DS_Store
+Thumbs.db
+# Credentials and local runtime state
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.key
+*.pem
+*.log
+.runtime/
+*.apk
+*.aab
+*.exe
+*.msi
+*.part
