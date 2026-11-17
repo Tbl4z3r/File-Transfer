@@ -1,8 +1,10 @@
 package local.filetransfer
 
+import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.net.Uri
 import android.content.Intent
-import androidx.core.content.FileProvider
 import android.os.Bundle
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
@@ -24,9 +26,10 @@ class MainActivity : ComponentActivity() {
     @Volatile private var client: ProtocolClient? = null
     @Volatile private var transferId: String? = null
     @Volatile private var cancelled = false
+    @Volatile private var operationStage = "idle"
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val inbox = File(filesDir, "inbox").apply { mkdirs() }
+        val receiveStorage = ReceiveStorage(this)
         File(filesDir, "partial").apply { mkdirs(); listFiles()?.forEach { it.delete() } }
         val store = PairStore(this)
         setContent {
@@ -39,13 +42,32 @@ class MainActivity : ComponentActivity() {
             var address by remember { mutableStateOf(pair?.host ?: "") }
             var portText by remember { mutableStateOf(pair?.port?.toString() ?: "") }
             var pending by remember { mutableStateOf<Pair<String, String>?>(null) }
-            var lastFile by remember { mutableStateOf<File?>(null) }
+            var lastReceived by remember { mutableStateOf<ReceivedDocument?>(null) }
+            var destination by remember { mutableStateOf(receiveStorage.destinationLabel()) }
+            var diagnostic by remember { mutableStateOf<String?>(null) }
             var offer by remember { mutableStateOf<Transfer?>(null) }
-            fun post(block: () -> Unit) { cancelled = false; busy = true; worker.execute { try { block() } catch (e: Exception) { runOnUiThread { message = "Transferencia interrumpida: ${e.message ?: "error"}. Vuelve a intentarlo." } } finally { transferId = null; runOnUiThread { busy = false } } } }
+            fun post(stage: String = "operation", block: () -> Unit) {
+                cancelled = false; busy = true; diagnostic = null; operationStage = stage
+                worker.execute {
+                    try { block() }
+                    catch (error: Exception) {
+                        val details = TransferDiagnostics.describe(operationStage, error)
+                        val explanation = TransferDiagnostics.userMessage(operationStage, error, cancelled)
+                        runOnUiThread { diagnostic = details; message = explanation }
+                    } finally { transferId = null; runOnUiThread { busy = false } }
+                }
+            }
             fun connected(): ProtocolClient { val p = requireNotNull(pair); return ProtocolClient(p.host, p.port, p.pin, p.deviceId, p.credential).also { client = it } }
             fun report(n: Long, total: Long) { runOnUiThread { progress = "$n / $total bytes" } }
+            val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+                val uri = result.data?.data
+                if (result.resultCode == Activity.RESULT_OK && uri != null) post("choose_folder") {
+                    val label = receiveStorage.selectTree(uri, result.data!!.flags)
+                    runOnUiThread { destination = label; message = "Los próximos archivos se guardarán en $label." }
+                }
+            }
             val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-                if (uri != null) post {
+                if (uri != null) post("send") {
                     val cursor = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null) ?: error("No se pudo leer la selección")
                     val (name, size) = cursor.use { require(it.moveToFirst()); it.getString(0) to it.getLong(1).also { _ -> require(!it.isNull(1)) } }
                     require(Validation.name(name)) { "Nombre no válido para Windows" }; Validation.size(size.toString())
@@ -64,11 +86,15 @@ class MainActivity : ComponentActivity() {
             MaterialTheme { Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Transferencia local", style = MaterialTheme.typography.headlineSmall)
                 Text(message); if (progress.isNotEmpty()) Text(progress)
+                diagnostic?.let { details -> TextButton(onClick = {
+                    (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Diagnóstico File Transfer", details))
+                    message = "Diagnóstico copiado; no incluye credenciales ni rutas de archivos."
+                }) { Text("Copiar diagnóstico") } }
                 if (pair == null) {
                     Text("Copia el descriptor desde el PC y verifica la huella por un canal físico.")
                     OutlinedTextField(descriptor, { descriptor = it }, label = { Text("Descriptor JSON") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(deviceName, { deviceName = it }, label = { Text("Nombre de este dispositivo") })
-                    Button(enabled = !busy, onClick = { val raw = descriptor; post { val d = Descriptor.parse(raw); val p = ProtocolClient(d.host, d.port, d.pin, store.deviceId()).pair(d, deviceName); store.save(p); runOnUiThread { pair = p; address = p.host; portText = p.port.toString(); descriptor = ""; message = "Dispositivo emparejado." } } }) { Text("Emparejar") }
+                    Button(enabled = !busy, onClick = { val raw = descriptor; post("pair") { val d = Descriptor.parse(raw); val p = ProtocolClient(d.host, d.port, d.pin, store.deviceId()).pair(d, deviceName); store.save(p); runOnUiThread { pair = p; address = p.host; portText = p.port.toString(); descriptor = ""; message = "Dispositivo emparejado." } } }) { Text("Emparejar") }
                 } else {
                     Text("PC emparejado: ${pair!!.host}:${pair!!.port}")
                     OutlinedTextField(address, { address = it }, label = { Text("IP del PC") }, enabled = !busy)
@@ -76,36 +102,70 @@ class MainActivity : ComponentActivity() {
                     TextButton(enabled = !busy, onClick = { runCatching { val port = portText.toInt(); require(Validation.ipv4(address) && port in 1024..65535); val updated = pair!!.copy(host = address, port = port); store.save(updated); pair = updated; message = "Dirección actualizada; se conserva la identidad emparejada." }.onFailure { message = "IP o puerto no válido." } }) { Text("Actualizar dirección") }
                     pending?.let { (id, hash) -> Button(enabled = !busy, onClick = { post { val c = connected(); val state = c.status(id); if (state.state == "completed") require(state.sha256 == hash) else require(c.complete(id, hash).state == "completed"); runOnUiThread { pending = null; message = "Confirmación remota completada." } } }) { Text("Reintentar confirmación remota") } }
                     Button(enabled = !busy, onClick = { picker.launch(arrayOf("*/*")) }) { Text("Enviar archivo") }
+                    Text("Carpeta de recepción: $destination")
+                    TextButton(enabled = !busy, onClick = {
+                        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+                        folderPicker.launch(intent)
+                    }) { Text("Elegir carpeta de recepción") }
+                    if (receiveStorage.selectedTree() != null) TextButton(enabled = !busy, onClick = { post("choose_folder") {
+                        receiveStorage.usePrivateInbox()
+                        runOnUiThread { destination = receiveStorage.destinationLabel(); message = "Se usará la bandeja privada de la aplicación." }
+                    } }) { Text("Usar bandeja privada") }
                     Button(enabled = !busy, onClick = { post { val offers = connected().offers(); runOnUiThread { offer = offers.firstOrNull(); message = if (offer == null) "No hay ofertas disponibles en el PC." else "Confirma si deseas recibir el archivo." } } }) { Text("Buscar archivo para recibir") }
                     offer?.let { selected ->
                         Text("${selected.name} · ${selected.size} bytes")
-                        Button(enabled = !busy, onClick = { offer = null; post {
+                        Button(enabled = !busy, onClick = { offer = null; post("receive") {
                             check(!cancelled) { "Cancelada" }; val c = connected(); transferId = selected.id
+                            receiveStorage.validateDestination()
                             val temp = File.createTempFile("recv-", ".part", File(filesDir, "partial")); var published = false
                             try {
                                 check(!cancelled) { "Cancelada" }; require(c.acceptDownload(selected.id).state == "ready"); check(!cancelled) { "Cancelada" }
+                                operationStage = "download"
                                 val hash = temp.outputStream().use { c.downloadContent(selected.id, selected.size, it) { n -> report(n, selected.size) } }
+                                operationStage = "verify"
                                 var remote = c.status(selected.id); val deadline = System.nanoTime() + 30_000_000_000L
                                 while (remote.state == "streaming" && System.nanoTime() < deadline) { Thread.sleep(700); remote = c.status(selected.id) }
                                 check(!cancelled) { "Cancelada" }; require(remote.state == "awaiting_verification" && remote.sha256 == hash) { "La integridad no coincide" }
-                                var index = 0; var dest: File
-                                while (true) { val ext = selected.name.lastIndexOf('.').takeIf { it > 0 } ?: selected.name.length; val name = if (index == 0) selected.name else selected.name.substring(0, ext) + " ($index)" + selected.name.substring(ext); dest = File(inbox, name); index++; try { java.nio.file.Files.createLink(dest.toPath(), temp.toPath()); break } catch (_: java.nio.file.FileAlreadyExistsException) {} }
+                                operationStage = "publish"
+                                runOnUiThread { message = "Guardando el archivo verificado en $destination…" }
+                                val received = receiveStorage.publish(temp, selected.name, selected.size, hash) { cancelled }
                                 published = true
                                 temp.delete()
-                                runOnUiThread { lastFile = dest; message = "Archivo íntegro guardado en la bandeja privada; confirmando al PC." }
-                                try { require(c.complete(selected.id, hash).state == "completed") } catch (e: Exception) { runOnUiThread { pending = selected.id to hash; message = "Archivo íntegro guardado; confirmación remota pendiente." }; return@post }
-                                runOnUiThread { message = "Recibido y verificado en la bandeja privada: ${dest.name}" }
-                            } catch (e: Exception) { if (!published) { temp.delete(); runCatching { c.cancel(selected.id) } }; throw e }
+                                runOnUiThread { lastReceived = received; message = "Archivo íntegro guardado; confirmando al PC." }
+                                operationStage = "confirm"
+                                try { require(c.complete(selected.id, hash).state == "completed") } catch (error: Exception) {
+                                    val remoteState = runCatching { c.status(selected.id) }.getOrNull()
+                                    val details = TransferDiagnostics.describe("confirm", error)
+                                    runOnUiThread {
+                                        diagnostic = details
+                                        if (remoteState?.state in setOf("cancelled", "failed")) {
+                                            pending = null
+                                            message = "El archivo quedó guardado y verificado, pero el PC terminó la operación. No necesitas descargarlo otra vez."
+                                        } else if (remoteState?.state == "completed" && remoteState.sha256 == hash) {
+                                            message = "Recibido y verificado: ${received.name}"
+                                        } else {
+                                            pending = selected.id to hash
+                                            message = "Archivo íntegro guardado; confirmación remota pendiente."
+                                        }
+                                    }
+                                    return@post
+                                }
+                                runOnUiThread { message = "Recibido y verificado: ${received.name}" }
+                            } catch (e: Exception) { if (!published) { runCatching { c.cancel(selected.id) } }; throw e }
+                            finally { temp.delete() }
                         } }) { Text("Aceptar recepción") }
                         TextButton(enabled = !busy, onClick = { offer = null }) { Text("Ahora no") }
                     }
-                    lastFile?.let { file -> TextButton(onClick = { val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.inbox", file); val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, contentResolver.getType(uri) ?: "*/*").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION); runCatching { startActivity(Intent.createChooser(intent, "Abrir archivo")) }.onFailure { message = "No hay una aplicación para abrir este archivo." } }) { Text("Abrir último archivo recibido") } }
+                    lastReceived?.let { received -> TextButton(onClick = { runCatching {
+                        val intent = Intent(Intent.ACTION_VIEW).setDataAndType(received.uri, contentResolver.getType(received.uri) ?: "*/*").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        startActivity(Intent.createChooser(intent, "Abrir archivo"))
+                    }.onFailure { message = "No se pudo abrir el archivo. Comprueba que siga disponible y que haya una aplicación compatible." } }) { Text("Abrir último archivo recibido") } }
                     if (busy) Button(onClick = { cancelled = true; val id = transferId; client?.interrupt(); if (id != null) Thread { runCatching { connected().cancel(id) } }.start(); message = "Cancelando…" }) { Text("Cancelar") }
                     TextButton(enabled = !busy, onClick = { store.forget(); pair = null; message = "Olvidado en este teléfono. También puedes revocarlo en el PC." }) { Text("Olvidar dispositivo") }
                 }
-                Text("Mantén la aplicación abierta durante la transferencia. Los archivos recibidos se guardan en el almacenamiento privado de la aplicación.")
+                Text("Mantén la aplicación abierta durante la transferencia. Puedes elegir la carpeta donde recibir los archivos. Si Android no permite elegir la raíz de Descargas, crea una subcarpeta como File Transfer.")
             } }
         }
     }
-    override fun onDestroy() { client?.interrupt(); worker.shutdownNow(); super.onDestroy() }
+    override fun onDestroy() { cancelled = true; client?.interrupt(); worker.shutdownNow(); super.onDestroy() }
 }

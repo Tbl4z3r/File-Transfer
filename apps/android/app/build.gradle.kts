@@ -7,8 +7,8 @@ android {
     namespace = "local.filetransfer"
     compileSdk = 36
     buildToolsVersion = "35.0.0"
-    defaultConfig { applicationId = "local.filetransfer"; minSdk = 28; targetSdk = 36; versionCode = 1; versionName = "0.1" }
-    buildFeatures { compose = true }
+    defaultConfig { applicationId = "local.filetransfer"; minSdk = 28; targetSdk = 36; versionCode = 2; versionName = "0.1.1" }
+    buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
 }
