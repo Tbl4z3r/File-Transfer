@@ -59,7 +59,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '21.0.13+9'
-      - run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+      - name: Prepare Android SDK
+        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;35.0.0"'
       - run: rustup toolchain install 1.100.0 --profile minimal
       - run: cargo +1.100.0 build --manifest-path apps/windows/core/Cargo.toml --locked --bin ft-core
       - run: ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
