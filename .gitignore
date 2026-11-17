@@ -26,3 +26,7 @@ Thumbs.db
 *.exe
 *.msi
 *.part
+
+# Python validation caches
+__pycache__/
+*.pyc

@@ -1,29 +1,28 @@
 # Continuidad
 
-## Estado guardado
+## Dirección y ramas
 
-Base H0 integrada en `main`: alcance y reglas, contrato H1 aprobado por Astra, 41 vectores/13 mensajes verificados, matriz de versiones y plan de pruebas. Todavía no hay aplicación instalable ni transferencia Windows ↔ Android demostrada.
+Por instrucción posterior del usuario, **GPT-6.1 Sol** coordina arquitectura, revisión e integración. Las aprobaciones históricas de Astra se conservan como evidencia. Delegación actual: Luna para tareas acotadas de validación/documentación; el orquestador revisa cambios sensibles. Máximo dos implementadores simultáneos.
 
-Implementación en curso en ramas/worktrees separados:
-- `task/h1-windows`: `/workspace/worktrees/h1-windows`, Sol, responsable de `apps/windows/**`.
-- `task/h1-android`: `/workspace/worktrees/h1-android`, Terra, responsable de `apps/android/**`.
-- `task/h0-infra`: `/workspace/worktrees/h0-infra`, borrador CI. No integrar workflow antes de verificar paths/builds de ambas apps.
-- Astra revisa contratos y diffs antes de integrar. Ver reportes en `docs/reviews/`.
+`prueba` reúne el estado actual solicitado por el usuario. `main` conserva la base H0 hasta aceptar una versión de aplicación. No declarar H1 completo sin las pruebas esenciales de hardware y rendimiento LAN descritas en `TESTING.md`. H2–H5 siguen pendientes.
 
-## Entorno y acceso
+## Entorno
 
-Linux Cloud, checkout principal `/workspace/File-Transfer`. La carpeta `C:\Users\aferi\Desktop\File-Transfer` no está montada aquí; ver `GETTING-STARTED-WINDOWS.md`.
+Checkout principal H0: `/workspace/File-Transfer`. Checkout de `prueba`: `/workspace/worktrees/integration-h1` (la ruta conserva su nombre anterior). Windows y Android se implementaron en worktrees `h1-windows` y `h1-android`, con ramas `task/h1-windows` y `task/h1-android`.
 
-Herramientas de esta máquina: `source /workspace/toolchains/env.sh` prepara Rust 1.100.0, JDK21 completo y Android SDK36/BuildTools35. El script de entorno es local a esta máquina y no contiene credenciales del proyecto. Otras máquinas deben seguir la matriz de compatibilidad.
+La carpeta `C:\Users\aferi\Desktop\File-Transfer` no está montada en Cloud. Para traer el proyecto al PC, usar `GETTING-STARTED-WINDOWS.md` y seleccionar la rama `prueba`.
 
-GitHub `Tbl4z3r/File-Transfer` se hizo público por decisión del usuario. Lectura accesible, repositorio remoto vacío al inspeccionarlo. Escritura rechazada403 tanto Git como API. Perfil conectado Tbl4z3r; instalación de la app enumerada únicamente en Bastian13U. Se identificó la app oficial `https://github.com/apps/chatgpt-codex-connector`, propietaria OpenAI, con escritura de contenido/workflows. No instalar la acción de terceros del Marketplace llamada chatgpt-codex-plugin-autopilot. No se ha publicado código.
+En esta máquina `source /workspace/toolchains/env.sh` configura Rust 1.100.0, JDK21 completo y SDK36/BuildTools35. Es configuración local; no debe copiarse como requisito a otras máquinas. Usar la matriz y los comandos de cada aplicación.
 
-El navegador integrado local no ofrece controles de interacción a este chat; no confundirlo con el navegador Linux Cloud. El usuario autorizó instalar la app oficial y las integraciones rutinarias, sin más preguntas de confirmación.
+## GitHub
+
+Repositorio autorizado `Tbl4z3r/File-Transfer`, público por decisión del usuario. Tras instalar la app oficial en Tbl4z3r, la lectura y el push funcionan; el bloqueo403 anterior quedó resuelto para contenido. La conexión no permite administrar ajustes del repositorio: cambiar rama predeterminada o protección devolvió403. Por la creación inicial del remoto, su rama predeterminada actualmente es `prueba`; `main` también existe. Mantener esta diferencia visible y no afirmar que se configuró protección.
+
+No usar tokens incrustados, keystores de distribución o certificados privados en Git. No hay claves de firma release ni instalación en hardware acreditada.
 
 ## Siguiente paso concreto
 
-1. Continuar implementadores existentes, sin sobrescribir sus worktrees. Revisar `git status` y mensajes antes de retomar.
-2. Compilar core y frontend Windows; compilar APK/test/lint con wrapper. Revisar TLS, autorización, hashes y consumo de fixtures.
-3. Astra revisa diffs y evidencia, corrige e integra secuencialmente. Ejecutar interoperabilidad real disponible en Linux, distinguiéndola del hardware objetivo.
-4. Cuando GitHub permita escritura, publicar ramas e historial, abrir PRs si corresponde y ejecutar CI Windows/Android; proteger main solo con checks comprobados.
-5. H1 no se cierra sin transferencia real Windows ↔ Android e integridad/rendimiento registrados. H2–H5 siguen pendientes.
+1. Consultar resultados de CI del último commit de `prueba`; corregir cualquier fallo nativo Windows/Android y mantener los locks reproducibles.
+2. Seguir el reporte de revisión e interoperabilidad. Una compilación y un test JVM no sustituyen ejecución Android real.
+3. Instalar en Windows y J4+, comprobar ABI con adb, transferir en ambos sentidos y registrar integridad/tiempo/MiB/s. Probar confirmación, revocación, corte, colisión y permisos.
+4. Solo después de cumplir aceptación, promover a `main` por PR. Empezar H2 de descubrimiento tras estabilizar H1, sin mezclar reanudación o distribución aún.
