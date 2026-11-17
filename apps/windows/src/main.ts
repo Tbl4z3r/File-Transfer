@@ -1,4 +1,4 @@
-export {};
+import { encodePairingQr } from './pairing-qr.js';
 type Peer = { id: string; name: string };
 type Transfer = { transfer_id: string; direction: 'upload' | 'download'; file_name: string; size_bytes: string; bytes_transferred: string; state: string; error_code?: string; sha256?: string; peer_id: string; destination: string | null };
 type Snapshot = { session: null | { host: string; port: number; cert_sha256: string }; receive_enabled: boolean; peers: Peer[]; transfers: Transfer[] };
@@ -23,6 +23,7 @@ let selectedSource: string | null = null;
 let latest: Snapshot | null = null;
 let peerSignature = '';
 let descriptorUntil = 0;
+let pairingGeneration = 0;
 let refreshing = false;
 let busy = false;
 const samples = new Map<string, { bytes: bigint; time: number; speed: number }>();
@@ -40,7 +41,16 @@ function formatBytes(value: bigint): string {
   return `${(n / 1024 ** unit).toLocaleString('es', { maximumFractionDigits: 1 })} ${['B','KiB','MiB','GiB','TiB'][unit]}`;
 }
 function terminal(state: string): boolean { return ['completed','failed','cancelled'].includes(state); }
-function hideDescriptor(): void { descriptorUntil = 0; $('pair-panel').classList.add('hidden'); $<HTMLTextAreaElement>('descriptor').value = ''; $('fingerprint').textContent = ''; }
+function hideDescriptor(): void {
+  pairingGeneration++;
+  descriptorUntil = 0;
+  $<HTMLImageElement>('pair-qr').removeAttribute('src');
+  $('pair-qr').classList.add('hidden');
+  $('qr-error').classList.add('hidden');
+  $('pair-panel').classList.add('hidden');
+  $<HTMLTextAreaElement>('descriptor').value = '';
+  $('fingerprint').textContent = '';
+}
 function showTransfer(t: Transfer): HTMLElement {
   const card = document.createElement('article'); card.className = 'transfer-card';
   const row = document.createElement('div'); row.className = 'row';
@@ -105,16 +115,37 @@ async function refresh(): Promise<void> {
   } finally { refreshing = false; }
 }
 $('session-form').onsubmit = event => { event.preventDefault(); void action(async () => { await invoke('start_session',{ bindIpv4:$<HTMLInputElement>('bind-ip').value.trim(),port:Number($<HTMLInputElement>('port').value) }); notice('Sesión abierta. Ahora puedes emparejar el móvil y enviar o recibir archivos.'); }); };
-$('stop-session').onclick = () => { void action(async () => { await invoke('stop_session'); hideDescriptor(); notice('Sesión cerrada. Las transferencias pendientes se han cancelado y se han eliminado sus parciales.'); }); };
+$('stop-session').onclick = () => { void action(async () => { hideDescriptor(); await invoke('stop_session'); notice('Sesión cerrada. Las transferencias pendientes se han cancelado y se han eliminado sus parciales.'); }); };
 $('receive').onchange = () => { void action(async () => { await invoke('set_receive_enabled',{ enabled:$<HTMLInputElement>('receive').checked }); }); };
 $('peer-select').onchange = () => { void refresh(); };
 $('choose-file').onclick = () => { void action(async () => { const source = await invoke<string | null>('choose_source'); if (source) { selectedSource = source; $('selected-file').textContent = source.split(/[\\/]/).pop() ?? source; } }); };
 $('send-file').onclick = () => { void action(async () => { await invoke('offer_download',{ peerId:$<HTMLSelectElement>('peer-select').value,source:selectedSource }); notice('Oferta enviada. Confirma la recepción en el móvil.'); }); };
-$('pair').onclick = () => { void action(async () => { const descriptor = await invoke<Descriptor>('open_pairing_window'); descriptorUntil = Date.now() + 120000; $<HTMLTextAreaElement>('descriptor').value = JSON.stringify(descriptor); $('fingerprint').textContent = `Huella: ${descriptor.cert_sha256.match(/.{1,8}/g)?.join(' ')}`; $('pair-panel').classList.remove('hidden'); $('pair-seconds').textContent = '120'; }); };
+$('pair').onclick = () => { void action(async () => {
+  hideDescriptor(); // Clear any earlier token/QR before an invocation or encoder can fail.
+  const generation = pairingGeneration;
+  const until = performance.now() + 120000; // Conservative: include IPC time in the server window.
+  const descriptor = await invoke<Descriptor>('open_pairing_window');
+  if (generation !== pairingGeneration || performance.now() >= until) return;
+  const payload = JSON.stringify(descriptor);
+  descriptorUntil = until;
+  $<HTMLTextAreaElement>('descriptor').value = payload;
+  $('fingerprint').textContent = `Huella: ${descriptor.cert_sha256.match(/.{1,8}/g)?.join(' ')}`;
+  try {
+    const qr = encodePairingQr(payload);
+    $<HTMLImageElement>('pair-qr').src = qr.dataUrl;
+    $('pair-qr').classList.remove('hidden');
+  } catch {
+    // Current descriptor remains available for manual entry; never retain an older image.
+    $('qr-error').classList.remove('hidden');
+  }
+  $('pair-panel').classList.remove('hidden');
+  $('pair-seconds').textContent = String(Math.max(0, Math.ceil((until - performance.now()) / 1000)));
+  $('pair-panel').scrollIntoView({ block: 'start' });
+}); };
 $('hide-pair').onclick = hideDescriptor;
-$('copy-pair').onclick = () => { void action(async () => { try { await navigator.clipboard.writeText($<HTMLTextAreaElement>('descriptor').value); notice('Datos copiados. Pégalos solo en tu Android.'); } catch { $<HTMLTextAreaElement>('descriptor').select(); notice('Selecciona Copiar o pulsa Ctrl+C para copiar los datos.'); } }); };
+$('copy-pair').onclick = () => { void action(async () => { if (!descriptorUntil || performance.now() >= descriptorUntil) { hideDescriptor(); return; } try { await navigator.clipboard.writeText($<HTMLTextAreaElement>('descriptor').value); notice('Datos copiados. Pégalos solo en tu Android.'); } catch { $<HTMLTextAreaElement>('descriptor').select(); notice('Selecciona Copiar o pulsa Ctrl+C para copiar los datos.'); } }); };
 setInterval(() => {
-  if (descriptorUntil) { const left = Math.ceil((descriptorUntil - Date.now()) / 1000); if (left <= 0) hideDescriptor(); else $('pair-seconds').textContent = String(left); }
+  if (descriptorUntil) { const left = Math.ceil((descriptorUntil - performance.now()) / 1000); if (left <= 0) hideDescriptor(); else $('pair-seconds').textContent = String(left); }
   void refresh().catch(error => { notice(messages[String(error)] ?? 'No se pudo actualizar el estado de la aplicación.',true); });
 },500);
 void refresh().catch(error => { notice(messages[String(error)] ?? 'No se pudo iniciar la aplicación.',true); });
