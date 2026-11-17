@@ -10,6 +10,8 @@ Aplicación personal para transferir archivos entre Windows y Android por la red
 - `main`: base H0 aprobada; promover una versión de aplicación cuando cumpla sus criterios de aceptación.
 - `task/<id>`: tareas acotadas con revisión y worktree propio. No se necesita una rama `develop` permanente.
 
+Consulta la [guía para probar los artefactos](docs/TRY-PRUEBA.md).
+
 ## Desarrollo
 
 Consulta la [matriz de versiones](docs/architecture/compatibility.md), las instrucciones de [Windows](apps/windows/README.md) y [Android](apps/android/README.md), el [contrato](protocol/PROTOCOL.md) y las [pruebas de aceptación](docs/TESTING.md).
