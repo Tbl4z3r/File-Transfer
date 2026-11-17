@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, integration/h1]
+    branches: [main, prueba]
   pull_request:
   workflow_dispatch:
 
@@ -39,6 +39,7 @@ jobs:
         with:
           node-version: '24.22.1'
       - run: rustup toolchain install 1.100.0 --profile minimal
+      - run: cargo +1.100.0 test --manifest-path apps/windows/core/Cargo.toml --locked
       - run: npm ci
         working-directory: apps/windows
       - run: npm run tauri -- build --no-bundle
