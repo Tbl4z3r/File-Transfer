@@ -32,6 +32,20 @@ class ValidationTest {
         assertTrue(runCatching { Descriptor.parse(valid.replace("\"port\":51337", "\"port\":\"51337\"")) }.isFailure)
         assertTrue(runCatching { Descriptor.parse(valid.replace("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB")) }.isFailure)
     }
+    @Test fun scannedDescriptorRejectsUrlsAndMalformedData() {
+        val fixture = JSONObject(File("../../../protocol/fixtures/h1-vectors.json").readText())
+            .getJSONObject("messages").getJSONObject("descriptor").toString()
+        var connections = 0
+        val descriptor = withValidatedDescriptor(fixture) { connections++; it }
+        assertEquals(1, connections)
+        assertTrue(Validation.ipv4(descriptor.host))
+        assertTrue(descriptor.port in 1024..65535)
+        for (input in listOf("https://example.com/", "file-transfer://$fixture", "{broken", "", fixture + " trailing", fixture.replace("\"host\":\"", "\"host\":\"https://"))) {
+            val result = runCatching { withValidatedDescriptor(input) { connections++; it } }
+            assertTrue("Rejected input", result.exceptionOrNull() is InvalidDescriptor)
+        }
+        assertEquals("Invalid scans must not start a connection", 1, connections)
+    }
     @Test fun rejectInvalidDescriptorAndNames() {
         assertFalse(Validation.ipv4("192.168.01.1")); assertFalse(Validation.ipv4("224.0.0.1")); assertFalse(Validation.name("COM³.txt")); assertEquals(4294967297, Validation.size("4294967297"))
     }

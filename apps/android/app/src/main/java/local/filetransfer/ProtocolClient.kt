@@ -77,6 +77,14 @@ data class Descriptor(val host: String, val port: Int, val serverId: String, val
         }
     }
 }
+class InvalidDescriptor : IllegalArgumentException()
+
+/** Validate the complete input before invoking any network operation. */
+internal fun <T> withValidatedDescriptor(raw: String, connect: (Descriptor) -> T): T {
+    val descriptor = try { Descriptor.parse(raw) } catch (_: Exception) { throw InvalidDescriptor() }
+    return connect(descriptor)
+}
+
 data class Pairing(val host: String, val port: Int, val serverId: String, val pin: String, val deviceId: String, val credential: String)
 data class Transfer(val id: String, val direction: String, val name: String, val size: Long, val state: String, val bytes: Long, val sha256: String?) {
     companion object { fun parse(o: JSONObject): Transfer {
@@ -88,6 +96,8 @@ data class Transfer(val id: String, val direction: String, val name: String, val
         return Transfer(id, direction, name, size, state, bytes, sha)
     } }
 }
+
+class ProtocolException(val code: String) : IllegalStateException("Error remoto")
 
 /** Dedicated TLS client; check pin, dates and PKIX before any HTTP data is sent. */
 class ProtocolClient(private val host: String, private val port: Int, pin: String, private val deviceId: String, private var credential: String? = null) {
@@ -123,7 +133,7 @@ class ProtocolClient(private val host: String, private val port: Int, pin: Strin
         req(path, method, body, auth).use { response ->
             val source = response.body.source(); source.request(16385); val bytes = source.readByteArray(minOf(source.buffer.size, 16385))
             require(bytes.size <= 16384)
-            val obj = strictObject(bytes); if (!response.isSuccessful) throw IllegalStateException("Error remoto: ${obj.optJSONObject("error")?.optString("code") ?: response.code}")
+            val obj = strictObject(bytes); if (!response.isSuccessful) throw ProtocolException(obj.optJSONObject("error")?.optString("code") ?: "unknown")
             return obj
         }
     }
