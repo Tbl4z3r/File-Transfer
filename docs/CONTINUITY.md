@@ -16,7 +16,7 @@ En esta máquina `source /workspace/toolchains/env.sh` configura Rust 1.100.0, J
 
 ## GitHub
 
-Repositorio autorizado `Tbl4z3r/File-Transfer`, público por decisión del usuario. Tras instalar la app oficial en Tbl4z3r, la lectura y el push funcionan; el bloqueo403 anterior quedó resuelto para contenido. La conexión no permite administrar ajustes del repositorio: cambiar rama predeterminada o protección devolvió403. Por la creación inicial del remoto, su rama predeterminada actualmente es `prueba`; `main` también existe. Mantener esta diferencia visible y no afirmar que se configuró protección.
+Repositorio autorizado `Tbl4z3r/File-Transfer`, público por decisión del usuario. Tras instalar la app oficial en Tbl4z3r, la lectura y el push funcionan; el bloqueo403 anterior quedó resuelto para contenido. La conexión no permite administrar ajustes del repositorio: cambiar la rama predeterminada devolvió403; la protección todavía no se ha configurado. Por la creación inicial del remoto, su rama predeterminada actualmente es `prueba`; `main` también existe. Mantener esta diferencia visible y no afirmar que se configuró protección.
 
 No usar tokens incrustados, keystores de distribución o certificados privados en Git. No hay claves de firma release ni instalación en hardware acreditada.
 
