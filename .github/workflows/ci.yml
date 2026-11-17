@@ -26,6 +26,8 @@ jobs:
       - run: rustup toolchain install 1.100.0 --profile minimal --component rustfmt --component clippy
       - run: cargo +1.100.0 fmt --manifest-path apps/windows/core/Cargo.toml --check
       - run: cargo +1.100.0 test --manifest-path apps/windows/core/Cargo.toml --locked
+      - run: cargo +1.100.0 build --manifest-path apps/windows/core/Cargo.toml --locked --bin ft-core
+      - run: python3 scripts/integration/smoke.py apps/windows/core/target/debug/ft-core
       - run: cargo +1.100.0 clippy --manifest-path apps/windows/core/Cargo.toml --locked --all-targets -- -D warnings
 
   windows:
@@ -37,8 +39,6 @@ jobs:
           node-version: '24.22.1'
       - run: rustup toolchain install 1.100.0 --profile minimal
       - run: npm ci
-        working-directory: apps/windows
-      - run: npm run build
         working-directory: apps/windows
       - run: npm run tauri -- build --no-bundle
         working-directory: apps/windows
