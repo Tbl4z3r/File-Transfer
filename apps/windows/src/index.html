@@ -144,7 +144,12 @@
             <p id="batch-status" role="status" aria-live="polite"></p>
             <button id="accept-batch" class="primary" type="button" hidden>Aceptar lote</button>
             <button id="cancel-batch" type="button">Cancelar lote</button>
+            <button id="retry-receive-batch" type="button" hidden>Reintentar recepción</button>
             <ul id="batch-files" class="batch-files" aria-label="Archivos del lote" tabindex="0"></ul>
+          </div>
+          <div id="retry-summary" class="panel batch-panel hidden">
+            <p id="retry-label"></p>
+            <button id="retry-send" class="primary" type="button">Reintentar</button>
           </div>
         </section>
         <div class="side-content">
@@ -188,6 +193,24 @@
         </button>
       </footer>
     </div>
+    <dialog id="retry-panel" aria-labelledby="retry-title">
+      <div class="dialog-heading">
+        <h2 id="retry-title">Reintentar envío</h2>
+        <button type="button" data-close="retry-panel">Cerrar</button>
+      </div>
+      <p id="retry-hint"></p>
+      <div id="retry-devices" class="device-list"></div>
+      <div id="retry-uncertain" class="hidden">
+        <p>Es posible que el móvil ya tenga estos archivos. Comprueba su carpeta de recepción.</p>
+        <p id="retry-uncertain-files"></p>
+        <label><input id="retry-include" type="checkbox" /> He comprobado el destino y quiero volver a ofrecer estos archivos</label>
+      </div>
+      <p class="dialog-notice hidden" role="status" aria-live="polite"></p>
+      <div class="transfer-actions">
+        <button id="retry-pair" type="button" hidden>Mostrar QR</button>
+        <button id="retry-confirm" class="primary" type="button" disabled>Ofrecer archivos</button>
+      </div>
+    </dialog>
     <dialog id="activity-panel" aria-labelledby="activity-title">
       <div class="dialog-heading">
         <h2 id="activity-title">Actividad de la sesión</h2>

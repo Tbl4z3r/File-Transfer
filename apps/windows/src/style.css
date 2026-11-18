@@ -2,18 +2,18 @@
   font-family: Inter, "Segoe UI", system-ui, sans-serif;
   font-synthesis: none;
   font-size: 14px;
-  color-scheme: light dark;
-  --bg: #f1f3f6;
-  --surface: #fff;
-  --ink: #253044;
-  --muted: #566274;
-  --accent: #526a8a;
-  --on-accent: #fff;
-  --soft: #e8edf3;
-  --line: #d9dfe7;
-  --outline: #8596bd;
-  --error: #a32632;
-  --error-bg: #fff0f1;
+  color-scheme: dark;
+  --bg: #192529;
+  --surface: #222e33;
+  --ink: #edf4f2;
+  --muted: #b9cbca;
+  --accent: #a4cbc7;
+  --on-accent: #192529;
+  --soft: #2a383d;
+  --line: #3b4c50;
+  --outline: #71898c;
+  --error: #ffb5bc;
+  --error-bg: #492c35;
   color: var(--ink);
   background: var(--bg);
 }
@@ -530,10 +530,10 @@ dialog {
   padding: 20px;
   color: var(--ink);
   background: var(--surface);
-  box-shadow: 0 18px 70px #09154030;
+  box-shadow: 0 18px 70px #10181d66;
 }
 dialog::backdrop {
-  background: #09154075;
+  background: #10181d9e;
 }
 .dialog-heading {
   display: flex;
@@ -595,25 +595,6 @@ textarea {
     11px/1.6 ui-monospace,
     monospace;
   margin-bottom: 10px;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1b222d;
-    --surface: #242e3c;
-    --ink: #f4f7fe;
-    --muted: #b0bdce;
-    --accent: #9bafcb;
-    --on-accent: #091540;
-    --soft: #2c394b;
-    --line: #3d4a5d;
-    --outline: #7288b4;
-    --error: #ffb5bc;
-    --error-bg: #482438;
-  }
-  .tooltip {
-    background: #abd2fa;
-    color: #091540;
-  }
 }
 @media (min-width: 1300px) {
   .main-content {
@@ -702,4 +683,12 @@ textarea {
     width: calc(100% - 20px);
     max-height: calc(100vh - 20px);
   }
+}
+
+#retry-devices button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--soft);
+}
+#retry-uncertain-files {
+  overflow-wrap: anywhere;
 }

@@ -39,6 +39,7 @@ pub struct LocalTransfer {
     pub transfer: Transfer,
     pub peer_id: String,
     pub destination: Option<PathBuf>,
+    pub delivery_uncertain: bool,
 }
 #[derive(Serialize)]
 pub struct Snapshot {
@@ -73,6 +74,26 @@ struct PairWindow {
     opened: Instant,
     attempts: u8,
 }
+#[derive(Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct SourceStamp {
+    pub size_bytes: String,
+    pub modified: String,
+}
+impl SourceStamp {
+    pub fn new(len: u64, modified: SystemTime) -> Self {
+        let modified = match modified.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(duration) => duration.as_nanos().to_string(),
+            Err(error) => format!("-{}", error.duration().as_nanos()),
+        };
+        Self {
+            size_bytes: len.to_string(),
+            modified,
+        }
+    }
+    fn matches(&self, source: &Source) -> bool {
+        *self == Self::new(source.len, source.modified)
+    }
+}
 #[derive(Clone)]
 struct Source {
     path: PathBuf,
@@ -89,6 +110,7 @@ struct Record {
     directory: Option<PathBuf>,
     published: Option<PathBuf>,
     source: Option<Source>,
+    final_bytes_released: bool,
 }
 struct ActiveSession {
     info: SessionInfo,
@@ -577,6 +599,7 @@ impl Engine {
             directory: None,
             published: None,
             source,
+            final_bytes_released: false,
         });
         Ok(transfer)
     }
@@ -602,7 +625,7 @@ impl Engine {
         )
     }
     pub fn offer_download(&self, peer: &str, source: impl AsRef<Path>) -> Result<Transfer> {
-        self.offer_download_checked(peer, source.as_ref(), None)
+        self.offer_download_checked(peer, source.as_ref(), None, None)
     }
     /// Bind a desktop offer to the session in which its files were selected.
     pub fn offer_download_in_session(
@@ -611,15 +634,28 @@ impl Engine {
         source: impl AsRef<Path>,
         session_id: &str,
     ) -> Result<Transfer> {
-        self.offer_download_checked(peer, source.as_ref(), Some(session_id))
+        self.offer_download_checked(peer, source.as_ref(), Some(session_id), None)
+    }
+    pub fn offer_retry_download(
+        &self,
+        peer: &str,
+        source: &Path,
+        session_id: &str,
+        expected: &SourceStamp,
+    ) -> Result<Transfer> {
+        self.offer_download_checked(peer, source, Some(session_id), Some(expected))
     }
     fn offer_download_checked(
         &self,
         peer: &str,
         source: &Path,
         session_id: Option<&str>,
+        expected: Option<&SourceStamp>,
     ) -> Result<Transfer> {
         let (name, snapshot) = Self::inspect_source(source)?;
+        if expected.is_some_and(|stamp| !stamp.matches(&snapshot)) {
+            return Err(Fault::new(409, "source_changed"));
+        }
         let mut inner = self.lock();
         if session_id.is_some_and(|id| {
             inner
@@ -831,6 +867,9 @@ impl Engine {
             }
         };
         let record = &mut inner.records[index];
+        if direction == Direction::Download && record.transfer.size_bytes == "0" {
+            record.final_bytes_released = true;
+        }
         record.transfer.state = TransferState::Streaming;
         record.changed = Instant::now();
         record.progressed = Instant::now();
@@ -839,6 +878,16 @@ impl Engine {
             record.cancel.clone(),
             record.transfer.size_bytes.parse().unwrap(),
         ))
+    }
+    fn mark_final_download_bytes(&self, peer: &AuthenticatedPeer, id: &str) -> Result<()> {
+        let mut inner = self.lock();
+        let index = Self::record_index(&inner, peer, id)?;
+        let record = &mut inner.records[index];
+        if record.transfer.state != TransferState::Streaming {
+            return Err(Fault::new(409, "invalid_state"));
+        }
+        record.final_bytes_released = true;
+        Ok(())
     }
     fn progress(&self, peer: &AuthenticatedPeer, id: &str, bytes: u64) -> Result<()> {
         let mut inner = self.lock();
@@ -957,6 +1006,8 @@ impl Engine {
                     transfer: r.transfer.clone(),
                     peer_id: r.peer_id.clone(),
                     destination: r.published.clone(),
+                    delivery_uncertain: r.final_bytes_released
+                        && r.transfer.state != TransferState::Completed,
                 })
                 .collect(),
         }

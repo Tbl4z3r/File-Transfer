@@ -66,13 +66,41 @@ impl Engine {
         sources: Vec<PathBuf>,
         session_id: &str,
     ) -> Result<BatchStatus> {
-        if !(2..=64).contains(&sources.len()) {
+        self.offer_download_batch_checked(peer, sources, session_id, None)
+    }
+    pub fn offer_retry_download_batch(
+        &self,
+        peer: &str,
+        sources: Vec<PathBuf>,
+        session_id: &str,
+        expected: &[SourceStamp],
+    ) -> Result<BatchStatus> {
+        self.offer_download_batch_checked(peer, sources, session_id, Some(expected))
+    }
+    fn offer_download_batch_checked(
+        &self,
+        peer: &str,
+        sources: Vec<PathBuf>,
+        session_id: &str,
+        expected: Option<&[SourceStamp]>,
+    ) -> Result<BatchStatus> {
+        if !(2..=64).contains(&sources.len())
+            || expected.is_some_and(|stamps| stamps.len() != sources.len())
+        {
             return Err(Fault::new(400, "invalid_request"));
         }
         let selected: Vec<_> = sources
             .iter()
             .map(|source| Self::inspect_source(source))
             .collect::<Result<_>>()?;
+        if expected.is_some_and(|stamps| {
+            stamps
+                .iter()
+                .zip(&selected)
+                .any(|(stamp, (_, source))| !stamp.matches(source))
+        }) {
+            return Err(Fault::new(409, "source_changed"));
+        }
         let batch = SessionBatch {
             local: LocalUploadBatch {
                 batch_id: new_id(),

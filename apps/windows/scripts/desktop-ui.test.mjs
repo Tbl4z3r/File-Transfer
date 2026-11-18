@@ -513,7 +513,7 @@ test("incoming manifest stays literal, retains rows and scroll, and reserves sen
     list.querySelector(".batch-file-name").textContent,
     "<img src=x onerror=alert(1)>.txt",
   );
-  assert.match(list.textContent, /1 KiB.*Pendiente de aceptación/);
+  assert.match(list.textContent, /1 kB.*Pendiente de aceptación/);
   assert.equal(h.element("send-file").disabled, true);
   assert.equal(h.element("accept-batch").hidden, false);
   assert.equal(h.element("cancel-batch").textContent, "Rechazar lote");
@@ -620,17 +620,17 @@ test("outbound rows show native selected metadata, then actual offered metadata,
   const { h, gate } = await sendingBatch({ delayOffer: true });
   const list = h.element("batch-files");
   assert.equal(list.children.length, 3);
-  assert.match(list.textContent, /uno.txt1 KiB.*dos.txt1 KiB/);
+  assert.match(list.textContent, /uno.txt1 kB.*dos.txt1 kB/);
   assert.equal(list.textContent.includes("C:\\"), false);
   gate.resolve();
   await h.settle();
   await h.tick();
-  assert.match(list.textContent, /uno.txt4,7 GiB/);
+  assert.match(list.textContent, /uno.txt5 GB/);
   h.snapshot.transfers[0].state = "failed";
   await h.tick();
   assert.match(
     list.textContent,
-    /Interrumpido.*dos.txt1 KiB · Sin enviar.*tres.txt1 KiB · Sin enviar/,
+    /Interrumpido.*dos.txt1 kB · Sin enviar.*tres.txt1 kB · Sin enviar/,
   );
   assert.equal(h.element("cancel-batch").hidden, true);
 });
@@ -741,7 +741,7 @@ test("outbound batch snapshots own progress and reserve the slot between files",
   await h.tick();
   assert.equal(list.children[0], first);
   assert.equal(list.scrollTop, 70);
-  assert.match(list.textContent, /nombre-real.txt2 KiB · Enviando/);
+  assert.match(list.textContent, /nombre-real.txt2 kB · Enviando/);
   assert.equal(h.element("current-transfer").querySelector('[data-transfer-action="cancel"]'), null);
   h.snapshot.download_batch.files[0].state = "completed";
   h.snapshot.transfers = [];
@@ -751,7 +751,7 @@ test("outbound batch snapshots own progress and reserve the slot between files",
   assert.equal(commands(h, "offer_download_batch").length, 1);
   h.element("cancel-batch").click();
   await h.settle();
-  assert.match(list.textContent, /Enviado y verificado.*dos.txt1 KiB · Sin enviar/);
+  assert.match(list.textContent, /Enviado y verificado.*dos.txt1 kB · Sin enviar/);
   h.snapshot.download_batch = null;
   await h.tick();
   assert.match(list.textContent, /Enviado y verificado.*Sin enviar/);
@@ -884,4 +884,136 @@ test("a snapshot requested before intentional stop cannot restore its active bat
   assert.match(h.element("notice").textContent, /^Sesión cerrada\./);
   assert.equal(h.element("batch-panel").classList.contains("hidden"), true);
   assert.equal(h.element("send-file").disabled, true);
+});
+
+test("retry after QR re-pair selects a fresh peer and skips verified and unavailable sources", async () => {
+  const retrySources = [...sources, {
+    source: "C:\\tres.txt", file_name: "tres.txt", size_bytes: "1024",
+  }].map((source) => ({
+    ...source, modified: "1000000000",
+  }));
+  const h = await ui(undefined, { peers: inboxPeers });
+  h.onInvoke(async (command, args) => {
+    if (command === "choose_sources") return retrySources;
+    if (command === "offer_download_batch") {
+      h.snapshot.download_batch = downloadBatch({
+        files: retrySources.map(({ file_name, size_bytes }) => ({
+          file_name, size_bytes, transfer_id: null, state: "pending",
+        })),
+      });
+      return { batch_id: "download-a", state: "awaiting_acceptance" };
+    }
+    if (command === "available_retry_sources") {
+      assert.deepEqual(Array.from(args.sources, (item) => item.file_name), ["dos.txt", "tres.txt"]);
+      return retrySources.slice(1, 2);
+    }
+    if (command === "offer_download") {
+      const offered = transfer({ direction: "download", transfer_id: "fresh-offer" });
+      h.snapshot.transfers.push(offered);
+      return offered;
+    }
+  });
+  h.element("send-file").click();
+  await h.settle();
+  const manifest = h.snapshot.download_batch;
+  manifest.state = "cancelled";
+  Object.assign(manifest.files[0], { transfer_id: "verified", state: "completed" });
+  Object.assign(manifest.files[1], { transfer_id: "interrupted", state: "cancelled" });
+  manifest.files[2].state = "not_sent";
+  h.snapshot.transfers = [transfer({
+    transfer_id: "interrupted", state: "cancelled", direction: "download",
+    delivery_uncertain: false, error_code: "revoked",
+  })];
+  h.snapshot.peers = [inboxPeers[1]];
+  await h.tick();
+  assert.equal(h.element("retry-summary").classList.contains("hidden"), false);
+  h.element("retry-send").click();
+  assert.equal(h.element("retry-confirm").disabled, true);
+  assert.equal(h.element("retry-pair").hidden, false);
+  h.element("retry-pair").click();
+  await h.settle();
+  assert.equal(commands(h, "open_pairing_window").length, 1);
+  h.snapshot.peers.push({ ...inboxPeers[0], id: "phone-fresh" });
+  await h.tick();
+  h.element("retry-send").click();
+  assert.equal(h.element("retry-confirm").disabled, true);
+  h.element("retry-devices").children[1].click();
+  h.element("retry-confirm").click();
+  await h.settle();
+  await h.tick();
+  assert.equal(commands(h, "offer_download_batch").length, 1);
+  const offered = commands(h, "offer_download")[0].args;
+  assert.equal(offered.peerId, "phone-fresh");
+  assert.equal(offered.source, retrySources[1].source);
+  assert.match(h.element("notice").textContent, /Se omitió un archivo/);
+  assert.equal(commands(h, "accept_upload_batch").length, 0);
+  assert.equal(commands(h, "accept_upload").length, 0);
+});
+
+test("ambiguous legacy retry asks the sender to check destination before offering again", async () => {
+  const h = await ui(undefined, { peers });
+  h.onInvoke(async (command, args) => {
+    if (command === "choose_sources") return sources.slice(0, 1);
+    if (command === "available_retry_sources") return args.sources;
+    if (command === "offer_download") {
+      const offered = transfer({ direction: "download" });
+      h.snapshot.transfers = [offered];
+      return offered;
+    }
+  });
+  h.element("send-file").click();
+  await h.settle();
+  Object.assign(h.snapshot.transfers[0], {
+    state: "failed", delivery_uncertain: true, error_code: "timeout",
+  });
+  await h.tick();
+  h.element("retry-send").click();
+  h.element("retry-devices").children[0].click();
+  assert.match(h.element("retry-uncertain-files").textContent, /uno.txt/);
+  assert.equal(h.element("retry-confirm").disabled, true);
+  h.element("retry-include").checked = true;
+  h.element("retry-include").onchange();
+  h.element("retry-confirm").click();
+  await h.settle();
+  assert.equal(commands(h, "offer_download").length, 2);
+});
+
+test("incoming interruption enables receiving and exposes QR without accepting a request", async () => {
+  const h = await ui(undefined, {
+    transfers: [transfer({ state: "cancelled", direction: "upload", error_code: "revoked" })],
+  });
+  h.onInvoke(async (command) => {
+    if (command === "set_receive_enabled") h.snapshot.receive_enabled = true;
+  });
+  h.element("current-transfer").querySelector('[data-transfer-action="prepare-receive"]').click();
+  await h.settle();
+  assert.equal(h.snapshot.receive_enabled, true);
+  assert.equal(commands(h, "open_pairing_window").length, 1);
+  assert.equal(commands(h, "accept_upload").length, 0);
+  assert.equal(commands(h, "choose_destination").length, 0);
+});
+
+test("stream progress and throughput use decimal SI prefixes", async () => {
+  const h = await ui(undefined, {
+    transfers: [transfer({ size_bytes: "1000000000", state: "streaming" })],
+  });
+  h.snapshot.transfers[0].bytes_transferred = "1500000";
+  await h.tick(1000);
+  assert.match(h.element("current-transfer").textContent, /1,5 MB de 1 GB · 1,5 MB\/s/);
+});
+
+
+test("an interrupted inbound manifest can prepare reception before any file was offered", async () => {
+  const h = await ui(undefined, {
+    upload_batch: uploadBatch({ state: "cancelled" }),
+  });
+  h.onInvoke(async (command) => {
+    if (command === "set_receive_enabled") h.snapshot.receive_enabled = true;
+  });
+  assert.equal(h.element("retry-receive-batch").hidden, false);
+  h.element("retry-receive-batch").click();
+  await h.settle();
+  assert.equal(h.snapshot.receive_enabled, true);
+  assert.equal(commands(h, "open_pairing_window").length, 1);
+  assert.equal(commands(h, "accept_upload_batch").length, 0);
 });

@@ -40,7 +40,13 @@ El lote muestra **Archivo i de n** y el número de pendientes. **Cancelar lote**
 
 La barra lateral abre **Actividad**, **Dispositivos** (incluye revocación) y **Ajustes** (dirección y cierre de sesión). La carpeta se elige con el selector nativo al aceptar, o antes con **Elegir**. Se reutiliza para las siguientes aceptaciones de esa sesión y se descarta al cerrarla; cambiarla no mueve una transferencia ya aceptada. No se guarda una preferencia persistente de carpeta.
 
-El tema sigue la preferencia clara/oscura del sistema. Los botones de la barra lateral tienen nombre accesible y ayuda al pasar el cursor o recibir foco.
+El tema oscuro en verde petróleo y menta se mantiene con cualquier preferencia del sistema. La interfaz muestra tamaños y velocidades con unidades decimales (1 MB = 1 000 000 bytes). Los botones de la barra lateral tienen nombre accesible y ayuda al pasar el cursor o recibir foco.
+
+## Reintentar transferencias (Windows 0.1.7)
+
+**Reintentar** vuelve a ofrecer los archivos pendientes del último envío mientras la ventana esté abierta. Si el móvil se desconectó, abre **Mostrar QR**, empareja el móvil y vuelve a **Reintentar** para elegir el destino. El nuevo envío empieza desde el principio y necesita aceptación en el móvil. Se omiten los archivos verificados y los orígenes que ya no están disponibles o cambiaron de tamaño o fecha de modificación. Si la entrega de un archivo quedó sin confirmación, comprueba la carpeta del móvil antes de autorizar que se ofrezca otra vez.
+
+Al recibir, **Reintentar recepción** habilita las solicitudes y abre el QR si hace falta emparejar el móvil. El móvil vuelve a enviar sus archivos pendientes y el usuario del PC acepta la solicitud nueva.
 
 ## Puerto automático
 
@@ -52,6 +58,6 @@ Al iniciar la sesión aparece el QR automáticamente. **Mostrar QR** permite ren
 
 El código es negro sobre blanco, con corrección M, margen blanco de cuatro módulos y seis píxeles por módulo (414 × 414 px para el fixture actual). Se elimina de la pantalla, junto al JSON, al cerrarlo (incluido Escape), abandonar la página, cerrar sesión o vencer los 120 segundos. Una nueva ventana invalida el token anterior en el servidor. Ocultar solo retira los datos de la pantalla; el token mantiene su vencimiento original. No compartir capturas mientras sea válido.
 
-Para comprobar el frontend y su ciclo de vida: `npm run test:qr`. La suite ampliada `npm run test:ui` incluye estas pruebas de QR y añade comandos de sesión, selector múltiple, secuencia del lote, cancelación incluso entre archivos y con IPC diferido, vinculación a sesión/dispositivo, recepción, aceptación/cancelación, revocación, progreso mayor de 4 GiB y nombres tratados como texto. El adaptador DOM/IPC vive únicamente en `scripts/`; no se distribuye como backend ni demuestra ejecución nativa en Windows. Para interoperabilidad con un lector independiente, después de compilar ejecuta `node scripts/export-pairing-qr.mjs /tmp/qr-fixture.gif`: exporta únicamente el fixture público de `protocol/fixtures/h1-vectors.json` y el JSON esperado en `/tmp/qr-fixture.gif.json`.
+Para comprobar el frontend y su ciclo de vida: `npm run test:qr`. La suite ampliada `npm run test:ui` incluye estas pruebas de QR y añade comandos de sesión, selector múltiple, secuencia del lote, cancelación incluso entre archivos y con IPC diferido, vinculación a sesión/dispositivo, recepción, aceptación/cancelación, revocación, progreso mayor de 4 GB y nombres tratados como texto. El adaptador DOM/IPC vive únicamente en `scripts/`; no se distribuye como backend ni demuestra ejecución nativa en Windows. Para interoperabilidad con un lector independiente, después de compilar ejecuta `node scripts/export-pairing-qr.mjs /tmp/qr-fixture.gif`: exporta únicamente el fixture público de `protocol/fixtures/h1-vectors.json` y el JSON esperado en `/tmp/qr-fixture.gif.json`.
 
 Dependencia gráfica: `qrcode-generator` **2.0.4**, MIT, fijada en el lock. `build.mjs` copia el ESM de navegador y su licencia a `dist/vendor/`; no se necesita bundler ni conexión de red en tiempo de ejecución. La licencia distribuida se conserva en `src/vendor/qrcode-LICENSE.txt`.

@@ -572,6 +572,10 @@ async fn read_download(
         if count + read as u64 > expected {
             return Err(Fault::new(409, "source_changed"));
         }
+        // Record uncertainty before the final body bytes can reach the receiver.
+        if count + read as u64 == expected {
+            engine.mark_final_download_bytes(peer, id)?;
+        }
         let bytes = Bytes::copy_from_slice(&buffer[..read]);
         tokio::select! { biased; _ = cancel.cancelled() => return Err(Fault::new(409, "invalid_state")), sent = tokio::time::timeout(engine.timeouts.idle, sender.send(Ok(bytes))) => sent.map_err(|_| Fault::new(500, "timeout"))?.map_err(|_| Fault::new(500, "network_error"))? }
         hash.update(&buffer[..read]);
