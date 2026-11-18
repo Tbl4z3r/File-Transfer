@@ -1,6 +1,6 @@
 # Probar la rama prueba en Windows y Android
 
-Esta entrega de desarrollo añade puerto automático en Windows y selección múltiple en Windows y Android. El usuario confirmó el QR y las transferencias en ambos sentidos con las versiones anteriores en Redmi Note 14 5G y Galaxy J4+. Vuelve a comprobar ese recorrido con las aplicaciones de esta entrega. Los artefactos aún usan firma de desarrollo en Android.
+Esta entrega añade aceptación de lotes de Android en Windows, detalle por archivo y una ventana compacta con la carpeta abajo a la izquierda. Actualiza ambos clientes para probar la aceptación del lote. El APK usa firma de desarrollo.
 
 ## Obtener aplicaciones
 
@@ -14,12 +14,12 @@ Esta entrega de desarrollo añade puerto automático en Windows y selección mú
 1. Conecta PC y móvil a la misma LAN. En Windows ejecuta `ipconfig` para identificar la IPv4 de la interfaz activa; evita la dirección de una VPN o una interfaz desconectada.
 2. En File Transfer para Windows introduce la IPv4 e inicia la sesión. Windows usa el puerto 51337 si está libre y pide uno disponible al sistema si está ocupado o reservado. Consulta la dirección y el puerto en **Ajustes → Conexión del PC**. Si el firewall pregunta, autoriza la aplicación para esa red privada.
 3. Pulsa **Mostrar QR** en Windows. En Android pulsa **Escanear QR del PC** debajo de **Conecta tu PC**, concede el permiso de cámara y apunta al código. El QR dura 120 segundos y solo puede usarse una vez. Si caduca o quieres conectar otro móvil, genera uno nuevo. La conexión manual está en el cuadro del QR de Windows y en los ajustes de Android.
-4. **Android → Windows.** Activa **Recibir** en Windows y usa **Enviar archivos** en Android. Puedes elegir uno o varios archivos. Acepta cada solicitud en el PC y elige la carpeta si aún no has fijado un destino para esa sesión.
+4. **Android → Windows.** Activa **Recibir** en Windows y elige varios elementos desde **Enviar archivos** en Android. En el PC puedes revisar el nombre y tamaño de cada uno antes de pulsar **Aceptar lote**. Usa el control de carpeta en la esquina inferior izquierda para fijar el destino. Si aún no hay carpeta, Windows la pide una vez al aceptar. El lote admite hasta 64 elementos con un manifiesto de hasta 16 KiB.
 5. **Windows → Android.** Selecciona el dispositivo y pulsa **Enviar archivos** en Windows. Elige los archivos con Ctrl o Mayús. En Android pulsa **Recibir archivo** para consultar la primera oferta y vuelve a pulsarlo para cada archivo siguiente. Puedes cambiar el destino desde **Carpeta de recepción** antes de aceptar. Android recuerda la carpeta y su permiso. Si no eliges una, usa la bandeja privada. En Android 11+ puede ser necesario crear una subcarpeta dentro de Descargas.
 6. Mantén Android abierto. La cola avanza después de cada archivo verificado y se detiene si cancelas, rechazas una oferta o falla un archivo. Los ya verificados se conservan. Si una confirmación queda pendiente, reinténtala antes de volver a elegir los archivos que faltan.
 7. Al terminar, cierra la sesión desde **Ajustes** en la barra izquierda de Windows. Si cambia la IP o Windows eligió otro puerto, actualiza esos datos desde el PC vinculado en Android. Se conserva el vínculo existente. Si cambia el certificado, inicia un nuevo emparejamiento.
 
-Para comprobar los lotes, selecciona tres archivos de tamaños distintos en cada plataforma. Acepta cada archivo y comprueba los hashes. Repite cancelando el segundo y comprueba que el primero se conserva y el tercero queda sin enviar.
+Para comprobar los lotes, selecciona tres archivos de tamaños distintos. Al recibir en Windows acepta el lote una sola vez y comprueba el resultado de cada fila. Repite cancelando el segundo. El primero debe conservarse y el tercero debe figurar como no enviado. Reduce la ventana para comprobar que los dispositivos y los botones quedan a la derecha y que el selector de carpeta permanece al pie. Con más archivos, desplázate en la lista debajo de la transferencia.
 
 ## Resultado que falta registrar
 

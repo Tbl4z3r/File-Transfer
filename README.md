@@ -2,7 +2,7 @@
 
 Aplicación personal para transferir archivos entre Windows y Android por la red local, con TLS, emparejamiento verificable y sin cuentas ni servicios externos para transferir.
 
-**Versión de desarrollo en `prueba`.** Esencial en Android concentra las acciones, la carpeta y el estado en una pantalla. Enfoque en Windows muestra la transferencia y los dispositivos junto a una barra de accesos. Ambas interfaces comparten una paleta azul con tema claro y oscuro. Windows elige el puerto al iniciar y ambos clientes permiten seleccionar varios archivos. La cola los transfiere en orden con autorización y verificación SHA-256 por archivo. El usuario comprobó el QR y las transferencias en Redmi Note 14 5G y Galaxy J4+ con las versiones previas. [Registro de prueba física](docs/reviews/manual-redmi-j4-2026-11-17.md).
+**Versión de desarrollo en `prueba`.** Esencial en Android concentra las acciones, la carpeta y el estado en una pantalla. Enfoque en Windows muestra los nombres, tamaños y estados de un lote bajo la transferencia actual. Windows elige el puerto al iniciar y ambos clientes permiten seleccionar varios archivos. Windows puede aceptar de una vez un lote anunciado por Android. Cuando Android recibe, consulta y acepta cada archivo. La cola transfiere y verifica los archivos por orden con SHA-256. [Registro de prueba física de las versiones anteriores](docs/reviews/manual-redmi-j4-2026-11-17.md).
 
 ## Ramas
 
