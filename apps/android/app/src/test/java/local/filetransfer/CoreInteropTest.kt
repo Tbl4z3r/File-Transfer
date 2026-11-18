@@ -39,12 +39,23 @@ class CoreInteropTest {
             command("receive", "enabled" to true)
             val bytes = ByteArray(1024 * 1024 + 31) { (it % 251).toByte() }
             val expected = MessageDigest.getInstance("SHA-256").digest(bytes).hex()
-            val upload = c.createUpload("muestra.bin", bytes.size.toLong())
-            command("accept_upload", "transfer_id" to upload.id, "destination" to inbox.path)
-            val (sent, hash) = c.uploadContent(upload.id, bytes.inputStream(), bytes.size.toLong()) {}
-            assertEquals(expected, hash); assertEquals(hash, sent.sha256)
-            assertEquals("completed", c.complete(upload.id, hash).state)
-            assertArrayEquals(bytes, File(inbox, "muestra.bin").readBytes())
+            val uploads = listOf("muestra.bin" to bytes, "segundo-vacío.bin" to byteArrayOf())
+            val completedIds = mutableListOf<String>()
+            SendQueue(uploads).run({ false }, {}) { (name, content) ->
+                // The real core rejects a second nonterminal transfer, so this also checks ordering.
+                val upload = c.createUpload(name, content.size.toLong())
+                command("accept_upload", "transfer_id" to upload.id, "destination" to inbox.path)
+                val (sent, hash) = c.uploadContent(upload.id, content.inputStream(), content.size.toLong()) {}
+                assertEquals(MessageDigest.getInstance("SHA-256").digest(content).hex(), hash)
+                assertEquals(hash, sent.sha256)
+                val completed = c.complete(upload.id, hash)
+                assertEquals("completed", completed.state)
+                assertEquals(hash, completed.sha256)
+                assertArrayEquals(content, File(inbox, name).readBytes())
+                completedIds += upload.id
+                true
+            }
+            assertEquals(2, completedIds.distinct().size)
             val source = File(root, "origen.bin").apply { writeBytes(bytes) }
             val offered = command("offer", "peer_id" to id, "source" to source.path)
             val transfer = c.offers().single(); assertEquals(offered.getString("transfer_id"), transfer.id)
