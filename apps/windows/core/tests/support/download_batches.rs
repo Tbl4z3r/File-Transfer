@@ -403,15 +403,19 @@ async fn creation_validates_count_preview_bound_and_session_before_reserving() {
     );
     assert!(local(&f).is_null());
     let maximal = f.destination.path().join("x".repeat(180));
-    fs::File::create(&maximal)
-        .unwrap()
-        .set_len(MAX_SIZE)
-        .unwrap();
+    fs::write(&maximal, b"data").unwrap();
     let maximum_batch = f
         .core
         .offer_download_batch(&peer.id, vec![maximal; 64], &session)
         .unwrap();
-    assert!(serde_json::to_vec(&f.inbox(&peer).await).unwrap().len() <= 16 * 1024);
+    let mut inbox = f.inbox(&peer).await;
+    let files = inbox["batch"]["files"].as_array_mut().unwrap();
+    assert_eq!(files.len(), 64);
+    // Exercise the longest size representation without allocating a large file on Windows.
+    for file in files {
+        file["size_bytes"] = json!(MAX_SIZE.to_string());
+    }
+    assert!(serde_json::to_vec(&inbox).unwrap().len() <= 16 * 1024);
     f.core
         .cancel_download_batch(&maximum_batch.batch_id)
         .unwrap();
