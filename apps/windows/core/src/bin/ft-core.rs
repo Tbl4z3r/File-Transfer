@@ -31,6 +31,14 @@ enum Command {
         peer_id: String,
         source: PathBuf,
     },
+    OfferDownloadBatch {
+        peer_id: String,
+        sources: Vec<PathBuf>,
+        session_id: String,
+    },
+    CancelDownloadBatch {
+        batch_id: String,
+    },
     Cancel {
         transfer_id: String,
     },
@@ -40,18 +48,22 @@ enum Command {
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
-    if args.len() != 8
+    if !(args.len() == 8 || (args.len() == 9 && args[8] == "--ephemeral-peers"))
         || args[1] != "serve"
         || args[2] != "--data"
         || args[4] != "--bind"
         || args[6] != "--port"
     {
         eprintln!(
-            "Uso: ft-core serve --data <directorio privado> --bind <IPv4 local> --port <1024..65535>"
+            "Uso: ft-core serve --data <directorio privado> --bind <IPv4 local> --port <1024..65535> [--ephemeral-peers]"
         );
         std::process::exit(2);
     }
-    let core = Engine::open(&args[3], "PC personal")?;
+    let core = if args.len() == 9 {
+        Engine::open_ephemeral(&args[3], "PC personal")?
+    } else {
+        Engine::open(&args[3], "PC personal")?
+    };
     let info = core
         .start_session(args[5].parse::<Ipv4Addr>()?, args[7].parse()?)
         .await?;
@@ -93,6 +105,19 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     }
                     Command::Offer { peer_id, source } => {
                         serde_json::to_value(core.offer_download(&peer_id, source)?).unwrap()
+                    }
+                    Command::OfferDownloadBatch {
+                        peer_id,
+                        sources,
+                        session_id,
+                    } => serde_json::to_value(core.offer_download_batch(
+                        &peer_id,
+                        sources,
+                        &session_id,
+                    )?)
+                    .unwrap(),
+                    Command::CancelDownloadBatch { batch_id } => {
+                        serde_json::to_value(core.cancel_download_batch(&batch_id)?).unwrap()
                     }
                     Command::Cancel { transfer_id } => {
                         serde_json::to_value(core.cancel(&transfer_id)?).unwrap()

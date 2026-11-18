@@ -47,10 +47,21 @@ impl Fixture {
         Self::timed(Timeouts::default()).await
     }
     async fn timed(timeouts: Timeouts) -> Self {
+        Self::configured(timeouts, false).await
+    }
+    async fn ephemeral() -> Self {
+        Self::configured(Timeouts::default(), true).await
+    }
+    async fn configured(timeouts: Timeouts, ephemeral: bool) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let data = TempDir::new().unwrap();
         let destination = TempDir::new().unwrap();
-        let core = Engine::open_with_timeouts(data.path(), "PC pruebas", timeouts).unwrap();
+        let core = if ephemeral {
+            Engine::open_ephemeral_with_timeouts(data.path(), "PC pruebas", timeouts)
+        } else {
+            Engine::open_with_timeouts(data.path(), "PC pruebas", timeouts)
+        }
+        .unwrap();
         let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = socket.local_addr().unwrap();
         drop(socket);
@@ -888,3 +899,6 @@ async fn desktop_offer_is_bound_to_the_selected_session_even_after_same_address_
 
 #[path = "support/upload_batches.rs"]
 mod upload_batches;
+
+#[path = "support/download_batches.rs"]
+mod download_batches;

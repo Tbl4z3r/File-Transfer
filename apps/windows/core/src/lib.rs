@@ -1,3 +1,4 @@
+mod download_batch;
 pub mod model;
 mod server;
 mod store;
@@ -13,7 +14,7 @@ use model::*;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
     fs::{self, File, OpenOptions},
     net::Ipv4Addr,
     path::{Path, PathBuf},
@@ -28,6 +29,7 @@ pub use server::SessionInfo;
 
 #[derive(Clone, Serialize)]
 pub struct Peer {
+    pub supports_inbox: bool,
     pub id: String,
     pub name: String,
 }
@@ -45,6 +47,7 @@ pub struct Snapshot {
     pub peers: Vec<Peer>,
     pub transfers: Vec<LocalTransfer>,
     pub upload_batch: Option<LocalUploadBatch>,
+    pub download_batch: Option<LocalUploadBatch>,
 }
 #[derive(Clone, Copy)]
 pub struct Timeouts {
@@ -70,6 +73,7 @@ struct PairWindow {
     opened: Instant,
     attempts: u8,
 }
+#[derive(Clone)]
 struct Source {
     path: PathBuf,
     len: u64,
@@ -91,6 +95,11 @@ struct ActiveSession {
     cancel: CancellationToken,
     closed: Arc<AtomicBool>,
 }
+#[derive(Clone)]
+struct AuthenticatedPeer {
+    id: String,
+    credential_hash: String,
+}
 struct Inner {
     registry: store::Registry,
     window: Option<PairWindow>,
@@ -98,7 +107,10 @@ struct Inner {
     session: Option<ActiveSession>,
     closing: Option<Arc<AtomicBool>>,
     receive: bool,
-    upload_batch: Option<upload_batch::UploadBatch>,
+    upload_batch: Option<upload_batch::SessionBatch>,
+    download_batch: Option<upload_batch::SessionBatch>,
+    peer_activity: HashMap<String, Instant>,
+    inbox_peers: HashSet<String>,
 }
 pub struct Engine {
     directory: PathBuf,
@@ -107,6 +119,7 @@ pub struct Engine {
     key: Vec<u8>,
     inner: Mutex<Inner>,
     timeouts: Timeouts,
+    ephemeral_peers: bool,
     _storage_lock: File,
 }
 fn random_secret() -> Result<String> {
@@ -133,8 +146,27 @@ impl Engine {
         server_name: &str,
         timeouts: Timeouts,
     ) -> Result<Arc<Self>> {
-        store::private_directory(directory.as_ref()).map_err(|e| io_fault(&e))?;
-        let directory = fs::canonicalize(directory.as_ref()).map_err(|e| io_fault(&e))?;
+        Self::open_configured(directory.as_ref(), server_name, timeouts, false)
+    }
+    /// Desktop credentials exist only in this running session; identity and partial journal persist.
+    pub fn open_ephemeral(directory: impl AsRef<Path>, server_name: &str) -> Result<Arc<Self>> {
+        Self::open_ephemeral_with_timeouts(directory, server_name, Timeouts::default())
+    }
+    pub fn open_ephemeral_with_timeouts(
+        directory: impl AsRef<Path>,
+        server_name: &str,
+        timeouts: Timeouts,
+    ) -> Result<Arc<Self>> {
+        Self::open_configured(directory.as_ref(), server_name, timeouts, true)
+    }
+    fn open_configured(
+        directory: &Path,
+        server_name: &str,
+        timeouts: Timeouts,
+        ephemeral_peers: bool,
+    ) -> Result<Arc<Self>> {
+        store::private_directory(directory).map_err(|e| io_fault(&e))?;
+        let directory = fs::canonicalize(directory).map_err(|e| io_fault(&e))?;
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -153,6 +185,9 @@ impl Engine {
             .map_err(|_| Fault::new(500, "identity_invalid"))?;
         let mut registry = store::registry(&directory)?;
         store::clean_orphans(&mut registry)?;
+        if ephemeral_peers {
+            registry.peers.clear();
+        }
         store::save(&directory.join("peers.json"), &registry).map_err(|e| io_fault(&e))?;
         Ok(Arc::new(Self {
             directory,
@@ -167,8 +202,12 @@ impl Engine {
                 closing: None,
                 receive: false,
                 upload_batch: None,
+                download_batch: None,
+                peer_activity: HashMap::new(),
+                inbox_peers: HashSet::new(),
             }),
             timeouts,
+            ephemeral_peers,
             _storage_lock: lock,
         }))
     }
@@ -176,7 +215,13 @@ impl Engine {
         self.inner.lock().expect("engine mutex poisoned")
     }
     fn save_registry(&self, registry: &store::Registry) -> Result<()> {
-        store::save(&self.directory.join("peers.json"), registry).map_err(|e| io_fault(&e))
+        if self.ephemeral_peers {
+            let mut journal = registry.clone();
+            journal.peers.clear();
+            store::save(&self.directory.join("peers.json"), &journal).map_err(|e| io_fault(&e))
+        } else {
+            store::save(&self.directory.join("peers.json"), registry).map_err(|e| io_fault(&e))
+        }
     }
     pub fn certificate_der(&self) -> &[u8] {
         &self.cert
@@ -213,6 +258,12 @@ impl Engine {
         }
         inner.records.clear();
         inner.upload_batch = None;
+        inner.download_batch = None;
+        if self.ephemeral_peers {
+            inner.registry.peers.clear();
+        }
+        inner.peer_activity.clear();
+        inner.inbox_peers.clear();
     }
     pub fn open_pairing_window(&self) -> Result<Descriptor> {
         let mut inner = self.lock();
@@ -246,24 +297,23 @@ impl Engine {
         Ok(())
     }
     pub fn list_peers(&self) -> Vec<Peer> {
-        self.lock()
-            .registry
-            .peers
-            .iter()
-            .map(|p| Peer {
-                id: p.id.clone(),
-                name: p.name.clone(),
-            })
-            .collect()
+        self.snapshot().peers
     }
     pub fn revoke_peer(&self, id: &str) -> Result<()> {
         let mut inner = self.lock();
+        self.revoke_peer_locked(&mut inner, id, "revoked")
+    }
+    fn revoke_peer_locked(&self, inner: &mut Inner, id: &str, code: &str) -> Result<()> {
         let before = inner.registry.clone();
         inner.registry.peers.retain(|p| p.id != id);
-        if let Err(error) = self.save_registry(&inner.registry) {
-            inner.registry = before;
-            return Err(error);
+        if !self.ephemeral_peers {
+            if let Err(error) = self.save_registry(&inner.registry) {
+                inner.registry = before;
+                return Err(error);
+            }
         }
+        inner.peer_activity.remove(id);
+        inner.inbox_peers.remove(id);
         let ids: Vec<_> = inner
             .records
             .iter()
@@ -271,16 +321,28 @@ impl Engine {
             .map(|r| r.transfer.transfer_id.clone())
             .collect();
         for transfer in ids {
-            self.terminate(&mut inner, &transfer, TransferState::Cancelled, "revoked");
+            self.terminate(inner, &transfer, TransferState::Cancelled, code);
         }
         if inner
             .upload_batch
             .as_ref()
             .is_some_and(|b| b.local.peer_id == id)
         {
-            self.stop_upload_batch_locked(&mut inner, BatchState::Cancelled, "revoked");
+            self.stop_upload_batch_locked(inner, BatchState::Cancelled, code);
+        }
+        if inner
+            .download_batch
+            .as_ref()
+            .is_some_and(|b| b.local.peer_id == id)
+        {
+            self.stop_download_batch_locked(inner, BatchState::Cancelled, code);
         }
         Ok(())
+    }
+    fn disconnect(&self, peer: &AuthenticatedPeer) -> Result<()> {
+        let mut inner = self.lock();
+        Self::ensure_authenticated(&inner, peer)?;
+        self.revoke_peer_locked(&mut inner, &peer.id, "revoked")
     }
     fn pair(&self, request: PairRequest) -> Result<PairResponse> {
         if !valid_id(&request.device_id) || !valid_device_name(&request.device_name) {
@@ -316,14 +378,19 @@ impl Engine {
         }
         let credential = random_secret()?;
         inner.registry.peers.push(store::PeerRecord {
-            id: request.device_id,
+            id: request.device_id.clone(),
             name: request.device_name,
             credential_hash: digest(credential.as_bytes()),
         });
-        if let Err(error) = self.save_registry(&inner.registry) {
-            inner.registry.peers.pop();
-            return Err(error);
+        if !self.ephemeral_peers {
+            if let Err(error) = self.save_registry(&inner.registry) {
+                inner.registry.peers.pop();
+                return Err(error);
+            }
         }
+        inner
+            .peer_activity
+            .insert(request.device_id, Instant::now());
         inner.window = None;
         Ok(PairResponse {
             protocol_version: 1,
@@ -332,16 +399,21 @@ impl Engine {
             credential,
         })
     }
-    fn authenticate(&self, id: &str, credential: &str) -> Result<String> {
+    fn authenticate(&self, id: &str, credential: &str) -> Result<AuthenticatedPeer> {
         if !valid_id(id) || !valid_secret(credential) {
             return Err(Fault::new(401, "unauthorized"));
         }
         let candidate = digest(credential.as_bytes());
-        let inner = self.lock();
+        let mut inner = self.lock();
+        self.expire_locked(&mut inner);
         if inner.registry.peers.iter().any(|p| {
             p.id == id && bool::from(p.credential_hash.as_bytes().ct_eq(candidate.as_bytes()))
         }) {
-            Ok(id.into())
+            inner.peer_activity.insert(id.into(), Instant::now());
+            Ok(AuthenticatedPeer {
+                id: id.into(),
+                credential_hash: candidate,
+            })
         } else {
             Err(Fault::new(401, "unauthorized"))
         }
@@ -353,16 +425,43 @@ impl Engine {
             Err(Fault::new(401, "unauthorized"))
         }
     }
-    fn record_index(inner: &Inner, peer: &str, id: &str) -> Result<usize> {
-        Self::ensure_peer(inner, peer)?;
+    fn ensure_authenticated(inner: &Inner, peer: &AuthenticatedPeer) -> Result<()> {
+        if inner.registry.peers.iter().any(|p| {
+            p.id == peer.id
+                && bool::from(
+                    p.credential_hash
+                        .as_bytes()
+                        .ct_eq(peer.credential_hash.as_bytes()),
+                )
+        }) {
+            Ok(())
+        } else {
+            Err(Fault::new(401, "unauthorized"))
+        }
+    }
+    fn record_index(inner: &Inner, peer: &AuthenticatedPeer, id: &str) -> Result<usize> {
+        Self::ensure_authenticated(inner, peer)?;
         inner
             .records
             .iter()
-            .position(|r| r.peer_id == peer && r.transfer.transfer_id == id)
+            .position(|r| r.peer_id == peer.id && r.transfer.transfer_id == id)
             .ok_or(Fault::new(404, "not_found"))
     }
     fn expire_locked(&self, inner: &mut Inner) {
-        self.expire_upload_batch_locked(inner);
+        if self.ephemeral_peers {
+            let expired: Vec<_> = inner
+                .peer_activity
+                .iter()
+                .filter(|(id, at)| {
+                    inner.inbox_peers.contains(*id) && at.elapsed() >= Duration::from_secs(45)
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in expired {
+                let _ = self.revoke_peer_locked(inner, &id, "revoked");
+            }
+        }
+        self.expire_batches_locked(inner);
         if inner
             .window
             .as_ref()
@@ -424,7 +523,7 @@ impl Engine {
                 let _ = self.save_registry(&inner.registry);
             }
         }
-        Self::sync_upload_batch_locked(inner);
+        Self::sync_batches_locked(inner);
     }
     fn new_record(
         inner: &mut Inner,
@@ -439,7 +538,7 @@ impl Engine {
             return Err(Fault::new(409, "session_closed"));
         }
         Self::ensure_peer(inner, peer)?;
-        if (!batch_entry && Self::upload_batch_busy(inner))
+        if (!batch_entry && Self::batch_busy(inner))
             || inner.records.iter().any(|r| !r.transfer.state.terminal())
         {
             return Err(Fault::new(409, "busy"));
@@ -478,19 +577,20 @@ impl Engine {
         });
         Ok(transfer)
     }
-    fn create_upload(&self, peer: &str, request: CreateUpload) -> Result<Transfer> {
+    fn create_upload(&self, peer: &AuthenticatedPeer, request: CreateUpload) -> Result<Transfer> {
         if !valid_name(&request.file_name) {
             return Err(Fault::new(400, "invalid_name"));
         }
         let size = parse_size(&request.size_bytes).ok_or(Fault::new(400, "invalid_request"))?;
         let mut inner = self.lock();
         self.expire_locked(&mut inner);
+        Self::ensure_authenticated(&inner, peer)?;
         if !inner.receive {
             return Err(Fault::new(409, "receive_disabled"));
         }
         Self::new_record(
             &mut inner,
-            peer,
+            &peer.id,
             request.file_name,
             size,
             Direction::Upload,
@@ -516,27 +616,7 @@ impl Engine {
         source: &Path,
         session_id: Option<&str>,
     ) -> Result<Transfer> {
-        let source = fs::canonicalize(source).map_err(|e| io_fault(&e))?;
-        let name = source
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or(Fault::new(400, "invalid_name"))?
-            .to_owned();
-        if !valid_name(&name) {
-            return Err(Fault::new(400, "invalid_name"));
-        }
-        let metadata = fs::metadata(&source).map_err(|e| io_fault(&e))?;
-        if !metadata.is_file() {
-            return Err(Fault::new(400, "invalid_request"));
-        }
-        if metadata.len() > MAX_SIZE {
-            return Err(Fault::new(413, "limit_exceeded"));
-        }
-        let snapshot = Source {
-            path: source,
-            len: metadata.len(),
-            modified: metadata.modified().map_err(|e| io_fault(&e))?,
-        };
+        let (name, snapshot) = Self::inspect_source(source)?;
         let mut inner = self.lock();
         if session_id.is_some_and(|id| {
             inner
@@ -556,6 +636,32 @@ impl Engine {
             Some(snapshot),
             false,
         )
+    }
+    fn inspect_source(source: &Path) -> Result<(String, Source)> {
+        let source = fs::canonicalize(source).map_err(|e| io_fault(&e))?;
+        let name = source
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or(Fault::new(400, "invalid_name"))?
+            .to_owned();
+        if !valid_name(&name) {
+            return Err(Fault::new(400, "invalid_name"));
+        }
+        let metadata = fs::metadata(&source).map_err(|e| io_fault(&e))?;
+        if !metadata.is_file() {
+            return Err(Fault::new(400, "invalid_request"));
+        }
+        if metadata.len() > MAX_SIZE {
+            return Err(Fault::new(413, "limit_exceeded"));
+        }
+        Ok((
+            name,
+            Source {
+                path: source,
+                len: metadata.len(),
+                modified: metadata.modified().map_err(|e| io_fault(&e))?,
+            },
+        ))
     }
     pub fn accept_upload(&self, id: &str, destination: impl AsRef<Path>) -> Result<Transfer> {
         let mut inner = self.lock();
@@ -602,7 +708,7 @@ impl Engine {
         record.changed = Instant::now();
         Ok(record.transfer.clone())
     }
-    fn accept_download(&self, peer: &str, id: &str) -> Result<Transfer> {
+    fn accept_download(&self, peer: &AuthenticatedPeer, id: &str) -> Result<Transfer> {
         let mut inner = self.lock();
         self.expire_locked(&mut inner);
         let index = Self::record_index(&inner, peer, id)?;
@@ -643,7 +749,7 @@ impl Engine {
             .transfer
             .clone())
     }
-    fn cancel_remote(&self, peer: &str, id: &str) -> Result<Transfer> {
+    fn cancel_remote(&self, peer: &AuthenticatedPeer, id: &str) -> Result<Transfer> {
         // Keep authorization and transition in one lock to cover concurrent revocation.
         let mut inner = self.lock();
         let index = Self::record_index(&inner, peer, id)?;
@@ -656,21 +762,21 @@ impl Engine {
         self.terminate(&mut inner, id, TransferState::Cancelled, "cancelled");
         Ok(inner.records[index].transfer.clone())
     }
-    fn status(&self, peer: &str, id: &str) -> Result<Transfer> {
+    fn status(&self, peer: &AuthenticatedPeer, id: &str) -> Result<Transfer> {
         let mut inner = self.lock();
         self.expire_locked(&mut inner);
         let index = Self::record_index(&inner, peer, id)?;
         Ok(inner.records[index].transfer.clone())
     }
-    fn offers(&self, peer: &str) -> Result<Vec<Transfer>> {
+    fn offers(&self, peer: &AuthenticatedPeer) -> Result<Vec<Transfer>> {
         let mut inner = self.lock();
         self.expire_locked(&mut inner);
-        Self::ensure_peer(&inner, peer)?;
+        Self::ensure_authenticated(&inner, peer)?;
         Ok(inner
             .records
             .iter()
             .filter(|r| {
-                r.peer_id == peer
+                r.peer_id == peer.id
                     && r.transfer.direction == Direction::Download
                     && r.transfer.state == TransferState::AwaitingAcceptance
             })
@@ -679,7 +785,7 @@ impl Engine {
     }
     fn claim_stream(
         &self,
-        peer: &str,
+        peer: &AuthenticatedPeer,
         id: &str,
         direction: Direction,
     ) -> Result<(File, CancellationToken, u64)> {
@@ -731,9 +837,10 @@ impl Engine {
             record.transfer.size_bytes.parse().unwrap(),
         ))
     }
-    fn progress(&self, peer: &str, id: &str, bytes: u64) -> Result<()> {
+    fn progress(&self, peer: &AuthenticatedPeer, id: &str, bytes: u64) -> Result<()> {
         let mut inner = self.lock();
         let index = Self::record_index(&inner, peer, id)?;
+        inner.peer_activity.insert(peer.id.clone(), Instant::now());
         let record = &mut inner.records[index];
         if record.cancel.is_cancelled() || record.transfer.state != TransferState::Streaming {
             return Err(Fault::new(409, "invalid_state"));
@@ -747,9 +854,10 @@ impl Engine {
         record.progressed = Instant::now();
         Ok(())
     }
-    fn finish_stream(&self, peer: &str, id: &str, hash: String) -> Result<Transfer> {
+    fn finish_stream(&self, peer: &AuthenticatedPeer, id: &str, hash: String) -> Result<Transfer> {
         let mut inner = self.lock();
         let index = Self::record_index(&inner, peer, id)?;
+        inner.peer_activity.insert(peer.id.clone(), Instant::now());
         let record = &mut inner.records[index];
         if record.cancel.is_cancelled() || record.transfer.state != TransferState::Streaming {
             return Err(Fault::new(409, "invalid_state"));
@@ -773,7 +881,7 @@ impl Engine {
     fn fail_stream(&self, id: &str, code: &'static str) {
         self.terminate(&mut self.lock(), id, TransferState::Failed, code);
     }
-    fn complete(&self, peer: &str, id: &str, hash: &str) -> Result<Transfer> {
+    fn complete(&self, peer: &AuthenticatedPeer, id: &str, hash: &str) -> Result<Transfer> {
         if !valid_hash(hash) {
             return Err(Fault::new(400, "invalid_request"));
         }
@@ -817,15 +925,16 @@ impl Engine {
         record.transfer.state = TransferState::Completed;
         record.changed = Instant::now();
         let transfer = record.transfer.clone();
-        Self::sync_upload_batch_locked(&mut inner);
+        Self::sync_batches_locked(&mut inner);
         Ok(transfer)
     }
     pub fn snapshot(&self) -> Snapshot {
         let mut inner = self.lock();
         self.expire_locked(&mut inner);
-        Self::sync_upload_batch_locked(&mut inner);
+        Self::sync_batches_locked(&mut inner);
         Snapshot {
             upload_batch: inner.upload_batch.as_ref().map(|b| b.local.clone()),
+            download_batch: inner.download_batch.as_ref().map(|b| b.local.clone()),
             session: inner.session.as_ref().map(|s| s.info.clone()),
             receive_enabled: inner.receive,
             peers: inner
@@ -833,6 +942,7 @@ impl Engine {
                 .peers
                 .iter()
                 .map(|p| Peer {
+                    supports_inbox: inner.inbox_peers.contains(&p.id),
                     id: p.id.clone(),
                     name: p.name.clone(),
                 })
@@ -847,5 +957,117 @@ impl Engine {
                 })
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    fn registered(core: &Engine, id: &str, credential: &str) {
+        core.lock().registry.peers.push(store::PeerRecord {
+            id: id.into(),
+            name: "Prueba".into(),
+            credential_hash: digest(credential.as_bytes()),
+        });
+    }
+    #[test]
+    fn ephemeral_open_clears_stale_peers_preserves_identity_and_cleans_only_owned_partials() {
+        let data = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let legacy = Engine::open(data.path(), "Prueba").unwrap();
+        let cert = legacy.certificate_der().to_vec();
+        let id = new_id();
+        registered(&legacy, &id, &random_secret().unwrap());
+        let partial = store::partial(files.path())
+            .unwrap()
+            .into_temp_path()
+            .keep()
+            .unwrap();
+        let completed = files.path().join("verified.txt");
+        fs::write(&completed, b"verified").unwrap();
+        legacy
+            .lock()
+            .registry
+            .partials
+            .extend([partial.clone(), completed.clone()]);
+        legacy.save_registry(&legacy.lock().registry).unwrap();
+        drop(legacy);
+        let desktop = Engine::open_ephemeral(data.path(), "Prueba").unwrap();
+        assert_eq!(desktop.certificate_der(), cert);
+        assert!(desktop.snapshot().peers.is_empty());
+        assert!(!partial.exists());
+        assert_eq!(fs::read(completed).unwrap(), b"verified");
+        let journaled = files.path().join(".file-transfer-owned.part");
+        fs::write(&journaled, b"partial").unwrap();
+        registered(&desktop, &new_id(), &random_secret().unwrap());
+        desktop.lock().registry.partials.push(journaled.clone());
+        desktop.save_registry(&desktop.lock().registry).unwrap();
+        let disk = store::registry(data.path()).unwrap();
+        assert!(disk.peers.is_empty());
+        assert_eq!(disk.partials, vec![journaled]);
+    }
+    #[test]
+    fn exact_credential_binding_rejects_an_authenticated_request_after_id_is_repaired() {
+        let data = tempfile::tempdir().unwrap();
+        let core = Engine::open_ephemeral(data.path(), "Prueba").unwrap();
+        let id = new_id();
+        let old_credential = random_secret().unwrap();
+        registered(&core, &id, &old_credential);
+        let request = core.authenticate(&id, &old_credential).unwrap();
+        core.revoke_peer(&id).unwrap();
+        let replacement = random_secret().unwrap();
+        registered(&core, &id, &replacement);
+        assert_eq!(core.disconnect(&request).unwrap_err().code, "unauthorized");
+        assert!(core.authenticate(&id, &replacement).is_ok());
+        assert_eq!(
+            core.authenticate(&id, &old_credential).err().unwrap().code,
+            "unauthorized"
+        );
+    }
+    #[test]
+    fn ephemeral_pair_and_disconnect_do_not_depend_on_registry_writes() {
+        let data = tempfile::tempdir().unwrap();
+        let core = Engine::open_ephemeral(data.path(), "Prueba").unwrap();
+        fs::remove_file(data.path().join("peers.json")).unwrap();
+        fs::create_dir(data.path().join("peers.json")).unwrap();
+        let token = random_secret().unwrap();
+        core.lock().window = Some(PairWindow {
+            token_hash: hash_secret(&token),
+            opened: Instant::now(),
+            attempts: 0,
+        });
+        let id = new_id();
+        let response = core
+            .pair(PairRequest {
+                device_id: id.clone(),
+                device_name: "Prueba".into(),
+                pairing_token: token,
+            })
+            .unwrap();
+        let authenticated = core.authenticate(&id, &response.credential).unwrap();
+        core.disconnect(&authenticated).unwrap();
+        assert!(core.snapshot().peers.is_empty());
+    }
+    #[test]
+    fn only_authenticated_activity_renews_inbox_lease() {
+        let data = tempfile::tempdir().unwrap();
+        let core = Engine::open_ephemeral(data.path(), "Prueba").unwrap();
+        let id = new_id();
+        let credential = random_secret().unwrap();
+        registered(&core, &id, &credential);
+        let request = core.authenticate(&id, &credential).unwrap();
+        core.inbox(&request).unwrap();
+        core.lock()
+            .peer_activity
+            .insert(id.clone(), Instant::now() - Duration::from_secs(44));
+        assert!(core.authenticate(&id, &random_secret().unwrap()).is_err());
+        assert!(core.lock().peer_activity[&id].elapsed() >= Duration::from_secs(44));
+        core.authenticate(&id, &credential).unwrap();
+        assert!(core.lock().peer_activity[&id].elapsed() < Duration::from_secs(1));
+        core.lock()
+            .peer_activity
+            .insert(id, Instant::now() - Duration::from_secs(46));
+        assert!(core.snapshot().peers.is_empty());
+        assert!(core.authenticate(&request.id, &credential).is_err());
     }
 }

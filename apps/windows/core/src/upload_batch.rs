@@ -12,7 +12,7 @@ pub enum BatchState {
     Failed,
 }
 impl BatchState {
-    fn terminal(self) -> bool {
+    pub(crate) fn terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Cancelled | Self::Failed)
     }
 }
@@ -58,13 +58,14 @@ pub struct LocalUploadBatch {
     pub state: BatchState,
     pub files: Vec<BatchFile>,
 }
-pub(crate) struct UploadBatch {
+pub(crate) struct SessionBatch {
     pub local: LocalUploadBatch,
-    directory: Option<PathBuf>,
-    changed: Instant,
+    pub(crate) directory: Option<PathBuf>,
+    pub(crate) sources: Vec<Source>,
+    pub(crate) changed: Instant,
 }
-impl UploadBatch {
-    fn status(&self) -> BatchStatus {
+impl SessionBatch {
+    pub(crate) fn status(&self) -> BatchStatus {
         BatchStatus {
             batch_id: self.local.batch_id.clone(),
             state: self.local.state,
@@ -72,28 +73,33 @@ impl UploadBatch {
     }
 }
 impl Engine {
-    pub(crate) fn upload_batch_busy(inner: &Inner) -> bool {
-        inner
-            .upload_batch
-            .as_ref()
-            .is_some_and(|b| !b.local.state.terminal())
+    pub(crate) fn batch_busy(inner: &Inner) -> bool {
+        [&inner.upload_batch, &inner.download_batch]
+            .into_iter()
+            .flatten()
+            .any(|b| !b.local.state.terminal())
     }
-    fn batch_index(inner: &Inner, peer: &str, id: &str) -> Result<()> {
-        Self::ensure_peer(inner, peer)?;
+    fn batch_index(inner: &Inner, peer: &AuthenticatedPeer, id: &str) -> Result<()> {
+        Self::ensure_authenticated(inner, peer)?;
         if inner
             .upload_batch
             .as_ref()
-            .is_some_and(|b| b.local.peer_id == peer && b.local.batch_id == id)
+            .is_some_and(|b| b.local.peer_id == peer.id && b.local.batch_id == id)
         {
             Ok(())
         } else {
             Err(Fault::new(404, "not_found"))
         }
     }
-    pub(crate) fn sync_upload_batch_locked(inner: &mut Inner) {
-        let Some(batch) = inner.upload_batch.as_mut() else {
-            return;
-        };
+    pub(crate) fn sync_batches_locked(inner: &mut Inner) {
+        for batch in [&mut inner.upload_batch, &mut inner.download_batch]
+            .into_iter()
+            .flatten()
+        {
+            Self::sync_batch(batch, &inner.records);
+        }
+    }
+    fn sync_batch(batch: &mut SessionBatch, records: &VecDeque<Record>) {
         if batch.local.state.terminal() {
             return;
         }
@@ -101,9 +107,9 @@ impl Engine {
             if let Some(record) = file
                 .transfer_id
                 .as_ref()
-                .and_then(|id| inner.records.iter().find(|r| &r.transfer.transfer_id == id))
+                .and_then(|id| records.iter().find(|r| &r.transfer.transfer_id == id))
             {
-                if matches!(record.transfer.state, TransferState::Completed)
+                if record.transfer.state == TransferState::Completed
                     && !matches!(
                         file.state,
                         BatchFileState::Transfer(TransferState::Completed)
@@ -141,7 +147,23 @@ impl Engine {
         state: BatchState,
         code: &str,
     ) {
-        let Some(batch) = inner.upload_batch.as_mut() else {
+        self.stop_batch_locked(inner, false, state, code);
+    }
+    pub(crate) fn stop_download_batch_locked(
+        &self,
+        inner: &mut Inner,
+        state: BatchState,
+        code: &str,
+    ) {
+        self.stop_batch_locked(inner, true, state, code);
+    }
+    fn stop_batch_locked(&self, inner: &mut Inner, download: bool, state: BatchState, code: &str) {
+        let batch = if download {
+            &mut inner.download_batch
+        } else {
+            &mut inner.upload_batch
+        };
+        let Some(batch) = batch.as_mut() else {
             return;
         };
         if batch.local.state.terminal() {
@@ -171,8 +193,13 @@ impl Engine {
                 code,
             );
         }
-        // Terminal batches still retain each file's final state independently of records.
-        if let Some(batch) = inner.upload_batch.as_mut() {
+        let batch = if download {
+            &mut inner.download_batch
+        } else {
+            &mut inner.upload_batch
+        };
+        // Terminal batch results survive eviction of older transfer records.
+        if let Some(batch) = batch.as_mut() {
             for file in &mut batch.local.files {
                 if let Some(record) = file
                     .transfer_id
@@ -184,40 +211,48 @@ impl Engine {
             }
         }
     }
-    pub(crate) fn expire_upload_batch_locked(&self, inner: &mut Inner) {
-        Self::sync_upload_batch_locked(inner);
-        let Some(batch) = inner.upload_batch.as_ref() else {
-            return;
-        };
-        if batch.local.state.terminal() {
-            return;
-        }
-        let between_files = !inner.records.iter().any(|r| !r.transfer.state.terminal());
-        if between_files && batch.changed.elapsed() >= self.timeouts.waiting {
-            let state = if batch.local.state == BatchState::AwaitingAcceptance {
-                BatchState::Cancelled
+    pub(crate) fn expire_batches_locked(&self, inner: &mut Inner) {
+        Self::sync_batches_locked(inner);
+        for download in [false, true] {
+            let batch = if download {
+                &inner.download_batch
             } else {
-                BatchState::Failed
+                &inner.upload_batch
             };
-            self.stop_upload_batch_locked(
-                inner,
-                state,
-                if state == BatchState::Cancelled {
-                    "cancelled"
+            let Some(batch) = batch.as_ref() else {
+                continue;
+            };
+            if batch.local.state.terminal() {
+                continue;
+            }
+            let between_files = !inner.records.iter().any(|r| !r.transfer.state.terminal());
+            if between_files && batch.changed.elapsed() >= self.timeouts.waiting {
+                let state = if batch.local.state == BatchState::AwaitingAcceptance {
+                    BatchState::Cancelled
                 } else {
-                    "timeout"
-                },
-            );
+                    BatchState::Failed
+                };
+                self.stop_batch_locked(
+                    inner,
+                    download,
+                    state,
+                    if state == BatchState::Cancelled {
+                        "cancelled"
+                    } else {
+                        "timeout"
+                    },
+                );
+            }
         }
     }
     pub(crate) fn create_upload_batch(
         &self,
-        peer: &str,
+        peer: &AuthenticatedPeer,
         request: CreateBatch,
     ) -> Result<BatchStatus> {
         let mut inner = self.lock();
         self.expire_locked(&mut inner);
-        Self::ensure_peer(&inner, peer)?;
+        Self::ensure_authenticated(&inner, peer)?;
         if inner.session.is_none() {
             return Err(Fault::new(409, "session_closed"));
         }
@@ -233,15 +268,13 @@ impl Engine {
             }
             parse_size(&file.size_bytes).ok_or(Fault::new(400, "invalid_request"))?;
         }
-        if Self::upload_batch_busy(&inner)
-            || inner.records.iter().any(|r| !r.transfer.state.terminal())
-        {
+        if Self::batch_busy(&inner) || inner.records.iter().any(|r| !r.transfer.state.terminal()) {
             return Err(Fault::new(409, "busy"));
         }
-        let batch = UploadBatch {
+        let batch = SessionBatch {
             local: LocalUploadBatch {
                 batch_id: new_id(),
-                peer_id: peer.into(),
+                peer_id: peer.id.clone(),
                 state: BatchState::AwaitingAcceptance,
                 files: request
                     .files
@@ -255,6 +288,7 @@ impl Engine {
                     .collect(),
             },
             directory: None,
+            sources: Vec::new(),
             changed: Instant::now(),
         };
         let status = batch.status();
@@ -297,7 +331,11 @@ impl Engine {
         batch.changed = Instant::now();
         Ok(batch.status())
     }
-    pub(crate) fn upload_batch_status(&self, peer: &str, id: &str) -> Result<BatchStatus> {
+    pub(crate) fn upload_batch_status(
+        &self,
+        peer: &AuthenticatedPeer,
+        id: &str,
+    ) -> Result<BatchStatus> {
         let mut inner = self.lock();
         self.expire_locked(&mut inner);
         Self::batch_index(&inner, peer, id)?;
@@ -305,7 +343,7 @@ impl Engine {
     }
     pub(crate) fn start_upload_batch(
         &self,
-        peer: &str,
+        peer: &AuthenticatedPeer,
         id: &str,
         index: usize,
     ) -> Result<Transfer> {
@@ -327,14 +365,21 @@ impl Engine {
         let name = file.file_name.clone();
         let size = parse_size(&file.size_bytes).unwrap();
         let destination = batch.directory.clone().unwrap();
-        let transfer =
-            Self::new_record(&mut inner, peer, name, size, Direction::Upload, None, true)?;
+        let transfer = Self::new_record(
+            &mut inner,
+            &peer.id,
+            name,
+            size,
+            Direction::Upload,
+            None,
+            true,
+        )?;
         inner.upload_batch.as_mut().unwrap().local.files[index].transfer_id =
             Some(transfer.transfer_id.clone());
         let record_index = inner.records.len() - 1;
         match self.accept_upload_locked(&mut inner, record_index, &destination) {
             Ok(transfer) => {
-                Self::sync_upload_batch_locked(&mut inner);
+                Self::sync_batches_locked(&mut inner);
                 Ok(transfer)
             }
             Err(error) => {
@@ -363,7 +408,11 @@ impl Engine {
         self.stop_upload_batch_locked(inner, BatchState::Cancelled, "cancelled");
         Ok(inner.upload_batch.as_ref().unwrap().status())
     }
-    pub(crate) fn cancel_upload_batch_remote(&self, peer: &str, id: &str) -> Result<BatchStatus> {
+    pub(crate) fn cancel_upload_batch_remote(
+        &self,
+        peer: &AuthenticatedPeer,
+        id: &str,
+    ) -> Result<BatchStatus> {
         let mut inner = self.lock();
         self.expire_locked(&mut inner);
         Self::batch_index(&inner, peer, id)?;
