@@ -85,7 +85,7 @@ internal fun <T> withValidatedDescriptor(raw: String, connect: (Descriptor) -> T
     return connect(descriptor)
 }
 
-data class Pairing(val host: String, val port: Int, val serverId: String, val pin: String, val deviceId: String, val credential: String)
+data class Pairing(val host: String, val port: Int, val serverId: String, val pin: String, val deviceId: String, val credential: String, val serverName: String = "")
 data class Transfer(val id: String, val direction: String, val name: String, val size: Long, val state: String, val bytes: Long, val sha256: String?) {
     companion object { fun parse(o: JSONObject): Transfer {
         val keys = o.keys().asSequence().toSet(); require(keys.containsAll(setOf("transfer_id", "direction", "file_name", "size_bytes", "state", "bytes_transferred")) && keys.all { it in setOf("transfer_id", "direction", "file_name", "size_bytes", "state", "bytes_transferred", "sha256", "error_code") })
@@ -143,7 +143,7 @@ class ProtocolClient(private val host: String, private val port: Int, pin: Strin
         require(o.keys().asSequence().toSet() == setOf("protocol_version", "server_device_id", "server_name", "credential") && o.integer("protocol_version") == 1 && o.text("server_device_id") == d.serverId)
         val serverName = o.text("server_name"); require(serverName.isNotEmpty() && serverName.codePointCount(0, serverName.length) <= 64 && serverName.none { it.code < 32 || it.code == 127 })
         val secret = o.text("credential"); require(Validation.token(secret)); credential = secret
-        return Pairing(host, port, d.serverId, d.pin, deviceId, secret)
+        return Pairing(host, port, d.serverId, d.pin, deviceId, secret, serverName)
     }
     fun createUpload(name: String, size: Long): Transfer { require(Validation.name(name)); Validation.size(size.toString()); return Transfer.parse(json("transfers", "POST", JSONObject().put("file_name", name).put("size_bytes", size.toString()))) }
     fun offers(): List<Transfer> { val o = json("offers"); require(o.keys().asSequence().toSet() == setOf("transfers")); val a = o.getJSONArray("transfers"); require(a.length() <= 1); return (0 until a.length()).map { Transfer.parse(a.getJSONObject(it)).also { t -> require(t.direction == "download" && t.state == "awaiting_acceptance") } } }

@@ -35,6 +35,7 @@ class CoreInteropTest {
             val c = ProtocolClient(descriptor.host, descriptor.port, descriptor.pin, id)
             val pair = c.pair(descriptor, "Prueba JVM")
             assertEquals(descriptor.serverId, pair.serverId)
+            assertEquals("PC personal", pair.serverName)
             command("receive", "enabled" to true)
             val bytes = ByteArray(1024 * 1024 + 31) { (it % 251).toByte() }
             val expected = MessageDigest.getInstance("SHA-256").digest(bytes).hex()
