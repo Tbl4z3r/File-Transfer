@@ -3,7 +3,6 @@ package local.filetransfer
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -17,7 +16,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -41,10 +39,11 @@ internal data class TransferPresentation(
     val result: String? = null,
     val id: String? = null,
     val receipt: ReceivedDocument? = null,
+    val bytesPerSecond: Long? = null,
 )
 
 internal fun formatBytes(bytes: Long): String {
-    val units = listOf("B", "KB", "MB", "GB", "TB")
+    val units = listOf("B", "kB", "MB", "GB", "TB")
     var value = bytes.toDouble()
     var unit = 0
     while (value >= 1000 && unit < units.lastIndex) { value /= 1000; unit++ }
@@ -53,24 +52,15 @@ internal fun formatBytes(bytes: Long): String {
 
 @Composable
 internal fun EsencialTheme(content: @Composable () -> Unit) {
-    val colors = if (isSystemInDarkTheme()) darkColorScheme(
-        primary = Color(0xFFA5CBC6), onPrimary = Color(0xFF163833),
+    val colors = darkColorScheme(
+        primary = Color(0xFFA4CBC7), onPrimary = Color(0xFF163833),
         primaryContainer = Color(0xFF29423F), onPrimaryContainer = Color(0xFFC7E9E3),
         secondary = Color(0xFFB6C8D0), onSecondary = Color(0xFF233941),
         secondaryContainer = Color(0xFF2B3B43), onSecondaryContainer = Color(0xFFDCE8EE),
-        background = Color(0xFF172125), onBackground = Color(0xFFE2ECEC),
-        surface = Color(0xFF212D32), onSurface = Color(0xFFE2ECEC),
+        background = Color(0xFF192529), onBackground = Color(0xFFEDF4F2),
+        surface = Color(0xFF222E33), onSurface = Color(0xFFEDF4F2),
         surfaceVariant = Color(0xFF303D46), onSurfaceVariant = Color(0xFFB7C6C9),
         outline = Color(0xFF819397), outlineVariant = Color(0xFF3A4A50),
-    ) else lightColorScheme(
-        primary = Color(0xFF315F59), onPrimary = Color.White,
-        primaryContainer = Color(0xFFDCECE8), onPrimaryContainer = Color(0xFF234F48),
-        secondary = Color(0xFF445E6C), onSecondary = Color.White,
-        secondaryContainer = Color(0xFFE2EAF0), onSecondaryContainer = Color(0xFF324D5C),
-        background = Color(0xFFF4F7F6), onBackground = Color(0xFF213135),
-        surface = Color(0xFFFBFDFC), onSurface = Color(0xFF213135),
-        surfaceVariant = Color(0xFFE5ECEC), onSurfaceVariant = Color(0xFF506166),
-        outline = Color(0xFF758789), outlineVariant = Color(0xFFD7E2E2),
     )
     MaterialTheme(colorScheme = colors, content = content)
 }
@@ -121,23 +111,21 @@ private fun SectionTitle(text: String) {
 internal fun EsencialScreen(
     pairedName: String?, pairedHost: String?, destination: String, busy: Boolean, busyLabel: String, cancellable: Boolean, message: String,
     transfer: TransferPresentation?, sendQueue: SendQueueProgress?, offer: Transfer?, batchOffer: DownloadOfferBatch?, activity: List<TransferPresentation>,
-    hasPending: Boolean, hasDiagnostic: Boolean,
+    hasPending: Boolean, hasDiagnostic: Boolean, canRetrySend: Boolean, canRetryInbox: Boolean,
     onSettings: () -> Unit, onScan: () -> Unit, onFolder: () -> Unit,
     onSend: () -> Unit, onReceive: () -> Unit, onAccept: () -> Unit, onDetail: () -> Unit, onDecline: () -> Unit,
     onCancel: () -> Unit, onRetry: () -> Unit, onDismissPending: () -> Unit, onDiagnostic: () -> Unit,
+    onRetrySend: () -> Unit, onRetryInbox: () -> Unit,
     onActivity: () -> Unit, onOpenReceived: (ReceivedDocument) -> Unit, onOpenLocation: (ReceiveLocation) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
-    val gradient = Brush.verticalGradient(if (isSystemInDarkTheme()) listOf(
-        Color(0xFF203135), colors.background, Color(0xFF202A32),
-    ) else listOf(Color(0xFFE8F0EC), colors.background, Color(0xFFE9EDF2)))
-    Box(Modifier.fillMaxSize().background(gradient).safeDrawingPadding(), contentAlignment = Alignment.TopCenter) {
+    Box(Modifier.fillMaxSize().background(colors.background).safeDrawingPadding(), contentAlignment = Alignment.TopCenter) {
         Column(Modifier.widthIn(max = 560.dp).fillMaxSize().padding(horizontal = 16.dp)) {
             Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Box(Modifier.size(34.dp).background(colors.primaryContainer, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
                     Glyph("swap")
                 }
-                Text("File Transfer", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Text("File Transfer", color = colors.onBackground, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                 IconButton(onClick = onSettings, modifier = Modifier.semantics { contentDescription = "Ajustes" }) { Glyph("settings") }
             }
             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 8.dp),
@@ -161,7 +149,7 @@ internal fun EsencialScreen(
                         }
                     }
                 }
-                if (pairedHost != null) {
+                if (pairedHost != null || canRetrySend || canRetryInbox) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         SectionTitle("Transferencia actual")
                         Surface(shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, colors.outlineVariant)) {
@@ -196,12 +184,13 @@ internal fun EsencialScreen(
                                             Button(onClick = onAccept, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Aceptar") }
                                         }
                                     }
-                                    transfer != null && (transfer.result == null || busy || hasPending) -> {
+                                    transfer != null && (transfer.result == null || busy || hasPending || canRetrySend || canRetryInbox) -> {
                                         FileRow(transfer.name, transfer.result ?: transfer.phase, if (transfer.result in setOf("Enviado y verificado", "Recibido y verificado")) "check" else "file")
                                         if (transfer.result == null) {
                                             if (transfer.phase in setOf("Enviando al PC", "Recibiendo del PC") && transfer.size > 0) {
                                                 LinearProgressIndicator(progress = { (transfer.bytes.toDouble() / transfer.size).toFloat().coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Avance de transferencia" })
-                                                Text("${formatBytes(transfer.bytes)} de ${formatBytes(transfer.size)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                val rate = transfer.bytesPerSecond?.let { " · ${formatBytes(it)}/s" }.orEmpty()
+                                                Text("${formatBytes(transfer.bytes)} de ${formatBytes(transfer.size)}$rate", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                             } else if (busy) LinearProgressIndicator(Modifier.fillMaxWidth().semantics { contentDescription = transfer.phase })
                                         } else Text(formatBytes(transfer.size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
@@ -213,6 +202,9 @@ internal fun EsencialScreen(
                                 if (hasPending) {
                                     Button(onClick = onRetry, enabled = !busy) { Text("Reintentar confirmación") }
                                     TextButton(onClick = onDismissPending, enabled = !busy) { Text("Cerrar confirmación pendiente") }
+                                } else if (!busy && offer == null && batchOffer == null) {
+                                    if (canRetrySend) Button(onClick = onRetrySend) { Text("Reintentar envío") }
+                                    if (canRetryInbox) TextButton(onClick = onRetryInbox) { Text("Reintentar bandeja") }
                                 }
                             }
                         }

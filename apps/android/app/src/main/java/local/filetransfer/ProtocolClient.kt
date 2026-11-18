@@ -56,7 +56,8 @@ object Validation {
     fun id(s: String) = id.matches(s)
     fun hash(s: String) = hash.matches(s)
     fun token(s: String) = token.matches(s)
-    fun size(s: String): Long { require(Regex("0|[1-9][0-9]*").matches(s)); return s.toLong().also { require(it <= 1099511627776L) } }
+    const val MAX_SIZE = 1099511627776L
+    fun size(s: String): Long { require(Regex("0|[1-9][0-9]*").matches(s)); return s.toLong().also { require(it <= MAX_SIZE) } }
     fun name(s: String): Boolean {
         if (s.isEmpty() || s.toByteArray(Charsets.UTF_8).size > 180 || s == "." || s == ".." || s.last() == '.' || s.last() == ' ') return false
         if (s.any { it.code < 32 || it.code == 127 || it in "/\\:*?\"<>|" }) return false
