@@ -634,3 +634,218 @@ test("an outgoing queue resumes visibly after a batch arriving between its files
     /uno.txt.*Enviado y verificado.*tres.txt/,
   );
 });
+
+const inboxPeers = peers.map((peer) => ({ ...peer, supports_inbox: true }));
+const sources = ["uno.txt", "dos.txt"].map((file_name) => ({
+  source: `C:\\${file_name}`, file_name, size_bytes: "1024",
+}));
+const downloadBatch = (extra = {}) => uploadBatch({
+  batch_id: "download-a",
+  files: sources.map(({ file_name, size_bytes }) => ({
+    file_name, size_bytes, transfer_id: null, state: "pending",
+  })),
+  ...extra,
+});
+async function sendingInboxBatch() {
+  const h = await ui(undefined, { peers: inboxPeers });
+  h.onInvoke(async (command) => {
+    if (command === "choose_sources") return sources;
+    if (command === "offer_download_batch") {
+      h.snapshot.download_batch = downloadBatch();
+      return { batch_id: "download-a", state: "awaiting_acceptance" };
+    }
+    if (command === "cancel_download_batch") {
+      h.snapshot.download_batch.state = "cancelled";
+      return { batch_id: "download-a", state: "cancelled" };
+    }
+  });
+  h.element("send-file").click();
+  await h.settle();
+  return h;
+}
+
+test("inbox peer receives one batch offer and never an individual or local acceptance", async () => {
+  const h = await sendingInboxBatch();
+  for (let i = 0; i < 3; i++) await h.tick();
+  h.element("send-file").click();
+  // Hidden buttons cannot be clicked in the browser; inspect their state here.
+  assert.equal(h.element("accept-batch").hidden, true);
+  assert.equal(commands(h, "offer_download_batch").length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(commands(h, "offer_download_batch")[0].args)), {
+    peerId: "phone-a", sources: sources.map((source) => source.source), sessionId: "session-a",
+  });
+  assert.equal(commands(h, "offer_download").length, 0);
+  assert.equal(commands(h, "accept_upload_batch").length, 0);
+  assert.equal(commands(h, "choose_destination").length, 0);
+  assert.equal(h.element("cancel-batch").textContent, "Cancelar lote");
+  assert.match(h.element("batch-status").textContent, /Esperando aceptación en el móvil/);
+  assert.equal(h.element("send-file").disabled, true);
+  h.element("cancel-batch").click();
+  await h.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(commands(h, "cancel_download_batch")[0].args)), {
+    batchId: "download-a",
+  });
+  assert.equal(commands(h, "cancel_transfer").length, 0);
+  assert.equal(h.element("cancel-batch").hidden, true);
+  assert.match(h.element("batch-files").textContent, /Sin enviar/);
+});
+
+test("outbound batch snapshots own progress and reserve the slot between files", async () => {
+  const h = await sendingInboxBatch();
+  const list = h.element("batch-files");
+  const first = list.children[0];
+  list.scrollTop = 70;
+  h.snapshot.download_batch.state = "accepted";
+  h.snapshot.download_batch.files[0] = {
+    file_name: "nombre-real.txt", size_bytes: "2048", transfer_id: "outgoing-a", state: "streaming",
+  };
+  h.snapshot.transfers = [transfer({
+    transfer_id: "outgoing-a", direction: "download", state: "streaming",
+  })];
+  await h.tick();
+  assert.equal(list.children[0], first);
+  assert.equal(list.scrollTop, 70);
+  assert.match(list.textContent, /nombre-real.txt2 KiB · Enviando/);
+  assert.equal(h.element("current-transfer").querySelector('[data-transfer-action="cancel"]'), null);
+  h.snapshot.download_batch.files[0].state = "completed";
+  h.snapshot.transfers = [];
+  await h.tick();
+  assert.equal(h.element("send-file").disabled, true);
+  assert.equal(commands(h, "offer_download").length, 0);
+  assert.equal(commands(h, "offer_download_batch").length, 1);
+  h.element("cancel-batch").click();
+  await h.settle();
+  assert.match(list.textContent, /Enviado y verificado.*dos.txt1 KiB · Sin enviar/);
+  h.snapshot.download_batch = null;
+  await h.tick();
+  assert.match(list.textContent, /Enviado y verificado.*Sin enviar/);
+  assert.equal(h.element("send-file").disabled, false);
+});
+
+for (const capable of [false, true])
+  test(`single file keeps v1 flow for supports_inbox=${capable}`, async () => {
+    const h = await ui(undefined, { peers: peers.map((peer) => ({ ...peer, supports_inbox: capable })) });
+    h.onInvoke(async (command) => {
+      if (command === "choose_sources") return sources.slice(0, 1);
+      if (command === "offer_download") {
+        const offered = transfer({ direction: "download" });
+        h.snapshot.transfers = [offered];
+        return offered;
+      }
+    });
+    h.element("send-file").click();
+    await h.settle();
+    assert.equal(commands(h, "offer_download").length, 1);
+    assert.equal(commands(h, "offer_download_batch").length, 0);
+  });
+
+test("outbound reservation arriving during source selection prevents a second offer", async () => {
+  const h = await ui(undefined, { peers: inboxPeers });
+  const gate = deferred();
+  h.onInvoke(async (command) => {
+    if (command === "choose_sources") return gate.promise;
+  });
+  h.element("send-file").click();
+  await h.settle();
+  h.snapshot.download_batch = downloadBatch();
+  await h.tick();
+  gate.resolve(sources);
+  await h.settle();
+  assert.equal(commands(h, "offer_download_batch").length, 0);
+  assert.equal(commands(h, "offer_download").length, 0);
+});
+
+test("a disappearing peer is named, asks for a new QR and keeps the other peer", async () => {
+  const { h } = await sendingBatch();
+  h.snapshot.peers = [peers[1]];
+  h.snapshot.transfers[0].state = "cancelled";
+  await h.tick();
+  assert.match(h.element("notice").textContent, /J4\+.*nuevo QR/);
+  assert.equal(h.element("device-choices").querySelectorAll("button").length, 1);
+  assert.match(h.element("device-choices").textContent, /Redmi Note 14/);
+  assert.equal(h.element("send-file").disabled, false);
+  assert.match(h.element("batch-status").textContent, /J4\+/);
+});
+
+test("simultaneous disappearance names every mobile without treating initial peers as lost", async () => {
+  const h = await ui(undefined, { peers: inboxPeers });
+  assert.equal(h.element("notice").textContent, "");
+  h.snapshot.peers = [];
+  await h.tick();
+  assert.match(h.element("notice").textContent, /J4\+, Redmi Note 14.*nuevo QR/);
+});
+
+test("closing an active batch clears session UI and keeps the intentional closure notice", async () => {
+  const h = await sendingInboxBatch();
+  h.onInvoke(async (command) => {
+    if (command === "choose_destination") return "C:\\Recibidos";
+    if (command === "stop_session") h.snapshot.peers = [];
+  });
+  h.element("choose-folder").click();
+  await h.settle();
+  await h.open();
+  assert.notEqual(h.element("descriptor").value, "");
+  h.element("stop-session").click();
+  await h.settle();
+  assert.match(h.element("notice").textContent, /^Sesión cerrada\./);
+  assert.equal(h.element("notice").textContent.includes("desconectado"), false);
+  assert.equal(h.element("batch-panel").classList.contains("hidden"), true);
+  assert.equal(h.element("descriptor").value, "");
+  assert.equal(h.element("folder-label").textContent, "Se elige al aceptar cada archivo");
+  assert.equal(h.element("send-file").disabled, true);
+  h.snapshot.session = { session_id: "session-b", host: "192.168.1.20", port: 51337 };
+  h.snapshot.download_batch = null;
+  await h.tick();
+  assert.equal(h.element("batch-panel").classList.contains("hidden"), true);
+  assert.match(h.element("notice").textContent, /^Sesión cerrada\./);
+});
+
+test("session replacement never reports old peers as disconnected and resets folder and QR", async () => {
+  const h = await ui(undefined, { peers: inboxPeers });
+  h.onInvoke(async (command) => {
+    if (command === "choose_destination") return "C:\\Recibidos";
+  });
+  h.element("choose-folder").click();
+  await h.settle();
+  await h.open();
+  h.snapshot.session.session_id = "session-b";
+  h.snapshot.peers = [];
+  await h.tick();
+  assert.equal(h.element("notice").textContent.includes("desconectado"), false);
+  assert.equal(h.element("descriptor").value, "");
+  assert.equal(h.element("folder-label").textContent, "Se elige al aceptar cada archivo");
+});
+
+test("peer departure preserves verified outbound rows and terminal snapshot results", async () => {
+  const h = await sendingInboxBatch();
+  h.snapshot.download_batch.files[0] = {
+    ...h.snapshot.download_batch.files[0], transfer_id: "verified-a", state: "completed",
+  };
+  h.snapshot.download_batch.state = "cancelled";
+  h.snapshot.peers = [inboxPeers[1]];
+  await h.tick();
+  assert.match(h.element("notice").textContent, /J4\+.*nuevo QR/);
+  assert.match(h.element("batch-status").textContent, /Lote cancelado.*J4\+/);
+  assert.match(h.element("batch-files").textContent, /Enviado y verificado.*Sin enviar/);
+  assert.equal(h.element("cancel-batch").hidden, true);
+  assert.equal(h.element("send-file").disabled, false);
+});
+
+test("a snapshot requested before intentional stop cannot restore its active batch", async () => {
+  const h = await sendingInboxBatch();
+  const gate = deferred();
+  h.onSnapshot(async (value) => {
+    await gate.promise;
+    return value;
+  });
+  await h.tick();
+  h.element("stop-session").click();
+  await h.settle();
+  gate.resolve();
+  await h.settle();
+  h.onSnapshot(null);
+  await h.tick();
+  assert.match(h.element("notice").textContent, /^Sesión cerrada\./);
+  assert.equal(h.element("batch-panel").classList.contains("hidden"), true);
+  assert.equal(h.element("send-file").disabled, true);
+});
