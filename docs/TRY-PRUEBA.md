@@ -1,6 +1,6 @@
 # Probar la rama prueba en Windows y Android
 
-Esta entrega incorpora el inicio automático en Windows y el acceso por archivo desde la actividad de Android. Actualiza ambos clientes. El APK usa firma de desarrollo.
+Esta entrega incorpora el reintento de transferencias interrumpidas, unidades decimales y una paleta petróleo y menta en ambas aplicaciones. Actualiza ambos clientes. El APK usa firma de desarrollo.
 
 ## Obtener aplicaciones
 
@@ -22,6 +22,8 @@ Esta entrega incorpora el inicio automático en Windows y el acceso por archivo 
 Para comprobar los lotes, selecciona tres archivos de tamaños distintos. Al recibir en Windows acepta el lote una sola vez y comprueba el resultado de cada fila. Repite cancelando el segundo. El primero debe conservarse y el tercero debe figurar como no enviado. Reduce la ventana para comprobar que los dispositivos y los botones quedan a la derecha y que el selector de carpeta permanece al pie. Con más archivos, desplázate en la lista debajo de la transferencia.
 
 En Android abre el detalle de actividad después de recibir dos archivos en destinos distintos. Comprueba que cada fila permita abrir su archivo y consultar la carpeta en la que se guardó, incluso después de cambiar la carpeta de recepción.
+
+Para comprobar las unidades, envía un archivo de exactamente 1 000 000 bytes y verifica que ambos equipos muestren 1 MB. Para probar el reintento, corta la conexión mientras se envía el segundo archivo de un lote de tres. Vuelve a vincular los equipos si la sesión caducó. En el dispositivo de origen, reintenta el envío y comprueba en el destino que el primer archivo verificado tiene una sola copia. Repite en el otro sentido.
 
 ## Resultado que falta registrar
 
