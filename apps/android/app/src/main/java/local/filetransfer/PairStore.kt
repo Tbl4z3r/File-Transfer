@@ -22,7 +22,7 @@ class PairStore(context: Context) {
     }
     fun deviceId(): String = prefs.getString("device_id", null) ?: UUID.randomUUID().toString().also { prefs.edit().putString("device_id", it).commit() }
     fun save(p: Pairing) {
-        val json = JSONObject().put("host", p.host).put("port", p.port).put("server", p.serverId).put("pin", p.pin).put("device", p.deviceId).put("credential", p.credential).toString()
+        val json = JSONObject().put("host", p.host).put("port", p.port).put("server", p.serverId).put("pin", p.pin).put("device", p.deviceId).put("credential", p.credential).put("server_name", p.serverName).toString()
         val cipher = Cipher.getInstance("AES/GCM/NoPadding"); cipher.init(Cipher.ENCRYPT_MODE, key()); val encrypted = cipher.doFinal(json.toByteArray(Charsets.UTF_8))
         check(prefs.edit().putString("pair", Base64.encodeToString(cipher.iv + encrypted, Base64.NO_WRAP)).commit())
     }
@@ -30,7 +30,7 @@ class PairStore(context: Context) {
         val value = prefs.getString("pair", null) ?: return null
         val bytes = Base64.decode(value, Base64.NO_WRAP); val cipher = Cipher.getInstance("AES/GCM/NoPadding"); cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12)))
         val o = JSONObject(String(cipher.doFinal(bytes.copyOfRange(12, bytes.size)), Charsets.UTF_8))
-        return Pairing(o.getString("host"), o.getInt("port"), o.getString("server"), o.getString("pin"), o.getString("device"), o.getString("credential"))
+        return Pairing(o.getString("host"), o.getInt("port"), o.getString("server"), o.getString("pin"), o.getString("device"), o.getString("credential"), o.optString("server_name", ""))
     }
     fun forget() { prefs.edit().remove("pair").apply(); ks.deleteEntry("pair-key") }
 }
