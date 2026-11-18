@@ -298,8 +298,9 @@ async fn route(engine: Arc<Engine>, request: Request<Body>) -> Result<Response<B
         return Err(Fault::new(405, "method_not_allowed"));
     }
     if route == "pair" {
+        let supports_inbox = unique_header(request.headers(), "x-ft-inbox") == Some("v1");
         let request = parse_json::<PairRequest>(request, engine.timeouts.headers).await?;
-        return Ok(json_response(201, &engine.pair(request)?));
+        return Ok(json_response(201, &engine.pair(request, supports_inbox)?));
     }
     let peer = engine.authenticate(
         unique_header(request.headers(), "x-device-id").unwrap_or(""),

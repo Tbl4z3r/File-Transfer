@@ -429,9 +429,15 @@ async fn creation_validates_count_preview_bound_and_session_before_reserving() {
 #[tokio::test]
 async fn ephemeral_inbox_lease_expires_over_real_tls_while_legacy_peer_survives() {
     let f = Fixture::ephemeral().await;
-    let peer = f.pair().await;
+    let peer = f.pair_with_inbox(true).await;
     let legacy = f.pair().await;
-    f.inbox(&peer).await;
+    assert!(
+        f.core
+            .snapshot()
+            .peers
+            .iter()
+            .any(|p| p.id == peer.id && p.supports_inbox)
+    );
     let batch = f.offer_batch(&peer, 2);
     tokio::time::sleep(Duration::from_secs(46)).await;
     let snapshot = f.core.snapshot();

@@ -306,11 +306,11 @@ impl Engine {
     fn revoke_peer_locked(&self, inner: &mut Inner, id: &str, code: &str) -> Result<()> {
         let before = inner.registry.clone();
         inner.registry.peers.retain(|p| p.id != id);
-        if !self.ephemeral_peers {
-            if let Err(error) = self.save_registry(&inner.registry) {
-                inner.registry = before;
-                return Err(error);
-            }
+        if !self.ephemeral_peers
+            && let Err(error) = self.save_registry(&inner.registry)
+        {
+            inner.registry = before;
+            return Err(error);
         }
         inner.peer_activity.remove(id);
         inner.inbox_peers.remove(id);
@@ -344,7 +344,7 @@ impl Engine {
         Self::ensure_authenticated(&inner, peer)?;
         self.revoke_peer_locked(&mut inner, &peer.id, "revoked")
     }
-    fn pair(&self, request: PairRequest) -> Result<PairResponse> {
+    fn pair(&self, request: PairRequest, supports_inbox: bool) -> Result<PairResponse> {
         if !valid_id(&request.device_id) || !valid_device_name(&request.device_name) {
             return Err(Fault::new(400, "invalid_request"));
         }
@@ -382,11 +382,14 @@ impl Engine {
             name: request.device_name,
             credential_hash: digest(credential.as_bytes()),
         });
-        if !self.ephemeral_peers {
-            if let Err(error) = self.save_registry(&inner.registry) {
-                inner.registry.peers.pop();
-                return Err(error);
-            }
+        if !self.ephemeral_peers
+            && let Err(error) = self.save_registry(&inner.registry)
+        {
+            inner.registry.peers.pop();
+            return Err(error);
+        }
+        if supports_inbox {
+            inner.inbox_peers.insert(request.device_id.clone());
         }
         inner
             .peer_activity
@@ -1038,11 +1041,14 @@ mod session_tests {
         });
         let id = new_id();
         let response = core
-            .pair(PairRequest {
-                device_id: id.clone(),
-                device_name: "Prueba".into(),
-                pairing_token: token,
-            })
+            .pair(
+                PairRequest {
+                    device_id: id.clone(),
+                    device_name: "Prueba".into(),
+                    pairing_token: token,
+                },
+                false,
+            )
             .unwrap();
         let authenticated = core.authenticate(&id, &response.credential).unwrap();
         core.disconnect(&authenticated).unwrap();

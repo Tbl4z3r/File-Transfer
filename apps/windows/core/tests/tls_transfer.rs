@@ -79,9 +79,20 @@ impl Fixture {
         }
     }
     async fn pair(&self) -> Paired {
+        self.pair_with_inbox(false).await
+    }
+    async fn pair_with_inbox(&self, inbox: bool) -> Paired {
         let descriptor = self.core.open_pairing_window().unwrap();
         let id = new_id();
-        let response = self.client.post(format!("{}/v1/pair",self.base)).json(&json!({"pairing_token":descriptor.pairing_token,"device_id":id,"device_name":"Android pruebas"})).send().await.unwrap();
+        let mut request = self.client.post(format!("{}/v1/pair", self.base));
+        if inbox {
+            request = request.header("X-FT-Inbox", "v1");
+        }
+        let response = request
+            .json(&json!({"pairing_token":descriptor.pairing_token,"device_id":id,"device_name":"Android pruebas"}))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let value: PairResponse = response.json().await.unwrap();
         assert_eq!(value.server_device_id, self.core.server_device_id());
