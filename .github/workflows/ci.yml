@@ -44,6 +44,7 @@ jobs:
         working-directory: apps/windows
       - run: npm run test:ui
         working-directory: apps/windows
+      - run: cargo +1.100.0 test --manifest-path apps/windows/src-tauri/Cargo.toml --locked network::tests
       - run: npm run tauri -- build --no-bundle
         working-directory: apps/windows
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

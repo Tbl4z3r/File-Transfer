@@ -1,6 +1,6 @@
 [package]
 name = "file-transfer-windows"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.100"
 
@@ -17,3 +17,6 @@ tauri-plugin-dialog = "=2.8.4"
 [profile.dev]
 debug = 0
 incremental = false
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
