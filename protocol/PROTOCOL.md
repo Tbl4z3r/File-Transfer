@@ -103,6 +103,8 @@ En H1 fallos/cancelación borran parciales; limpiar temporales propios huérfano
 
 La extensión opcional [Lotes de Android a Windows](UPLOAD-BATCHES.md) define el manifiesto y su aprobación local. Los cuerpos y la comprobación de integridad de cada archivo siguen este contrato.
 
+[Vínculo de sesión y bandeja de Android](SESSION-INBOX.md) define la caducidad de vínculos del escritorio y los lotes de Windows a Android.
+
 El QR implementado codifica exactamente este descriptor JSON v1, sin URI/prefijo y sin modificar autenticación. El lector solo procesa QR, usa Descriptor.parse antes de iniciar HTTP y no abre enlaces. H2 conserva pendiente mDNS no confiable. H3 añade lotes y ciclo de vida/UX. H4 necesita un contrato nuevo revisado: identidad de fuente estable, manifiesto/bloques hasheados, offsets verificados por ambos, retención visible, autenticación al reconectar, journal y permisos persistentes antes de recuperación tras reinicio. No implementar Range, append ni retomar offsets no verificados en H1. Los IDs actuales y estados permiten evolucionar sin mezclar versiones de archivo, pero no constituyen implementación de reanudación.
 
 Vectores normativos en `fixtures/h1-vectors.json`; ejecutar `python3 protocol/validate_fixtures.py`. Ambas implementaciones deben consumirlos para IDs/tamaños/nombres/hashes. Añadir pruebas propias de TLS con pin incorrecto, token expirado/repetido, receptor sin autorización, acceso de otro peer, revocación durante stream, upload/download íntegro, hash incorrecto, truncado, cancelación, colisión y memoria acotada. Los vectores y pruebas de Linux no sustituyen compilación Windows, APK/emulador ni prueba real Windows ↔ J4+.
