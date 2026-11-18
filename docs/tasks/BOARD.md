@@ -15,6 +15,7 @@ Estados: pendiente → lista → en curso → en revisión → cambios solicitad
 | PUERTO-LOTES | Puerto automático en Windows y selección múltiple en ambos clientes | GPT-6.2 y dos implementadores Sol | en prueba; confirmar en dispositivos | Sesión TLS y transferencias v1 |
 | DETALLE-LOTE-PC | Aceptar un lote en Windows, revisar estados y usar ventana compacta | GPT-6.2 | en prueba; confirmar en dispositivos | Manifiesto autenticado de subida y colas |
 | SESION-BANDEJA | Retirar vínculos al cerrar y mostrar ofertas de Windows con detalle en Android | GPT-6.2 | en prueba; confirmar en dispositivos | QR y manifiestos de lote |
+| ARRANQUE-DISEÑO | Selección automática de IPv4, fondo atenuado y acceso por archivo en Android | GPT-6.2 y dos implementadores Sol | en prueba | Lotes verificados en ambos sentidos por el usuario |
 | H2–H5 | Descubrimiento, uso cotidiano, recuperación y distribución | por asignar | pendiente | H1 validado |
 
 La revisión del autor no equivale a aprobación. Las verificaciones en dispositivos físicos y mediciones de la LAN requieren acceso real al Windows y al J4+.
