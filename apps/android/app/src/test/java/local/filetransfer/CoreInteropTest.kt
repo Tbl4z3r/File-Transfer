@@ -41,10 +41,18 @@ class CoreInteropTest {
             val expected = MessageDigest.getInstance("SHA-256").digest(bytes).hex()
             val uploads = listOf("muestra.bin" to bytes, "segundo-vacío.bin" to byteArrayOf())
             val completedIds = mutableListOf<String>()
-            SendQueue(uploads).run({ false }, {}) { (name, content) ->
-                // The real core rejects a second nonterminal transfer, so this also checks ordering.
-                val upload = c.createUpload(name, content.size.toLong())
-                command("accept_upload", "transfer_id" to upload.id, "destination" to inbox.path)
+            val batch = c.createUploadBatch(uploads.map { UploadFile(it.first, it.second.size.toLong()) })
+            assertEquals("awaiting_acceptance", batch.state)
+            val denied = runCatching { c.startBatchFile(batch.id, 0) }.exceptionOrNull()
+            assertTrue(denied is ProtocolException)
+            assertEquals("invalid_state", (denied as ProtocolException).code)
+            // Exactly one local PC authorization covers both authenticated uploads.
+            command("accept_upload_batch", "batch_id" to batch.id, "destination" to inbox.path)
+            assertEquals("accepted", c.batchStatus(batch.id).state)
+            SendQueue(uploads.withIndex().toList()).run({ false }, {}) { (index, source) ->
+                val (name, content) = source
+                val upload = c.startBatchFile(batch.id, index)
+                requireReadyUpload(upload, UploadFile(name, content.size.toLong()))
                 val (sent, hash) = c.uploadContent(upload.id, content.inputStream(), content.size.toLong()) {}
                 assertEquals(MessageDigest.getInstance("SHA-256").digest(content).hex(), hash)
                 assertEquals(hash, sent.sha256)
@@ -56,6 +64,7 @@ class CoreInteropTest {
                 true
             }
             assertEquals(2, completedIds.distinct().size)
+            assertEquals("completed", c.batchStatus(batch.id).state)
             val source = File(root, "origen.bin").apply { writeBytes(bytes) }
             val offered = command("offer", "peer_id" to id, "source" to source.path)
             val transfer = c.offers().single(); assertEquals(offered.getString("transfer_id"), transfer.id)

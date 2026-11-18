@@ -97,7 +97,31 @@ data class Transfer(val id: String, val direction: String, val name: String, val
     } }
 }
 
-class ProtocolException(val code: String) : IllegalStateException("Error remoto")
+data class UploadFile(val name: String, val size: Long) {
+    init { require(Validation.name(name)); Validation.size(size.toString()) }
+    internal fun json() = JSONObject().put("file_name", name).put("size_bytes", size.toString())
+}
+
+data class UploadBatch(val id: String, val state: String) {
+    companion object {
+        fun parse(o: JSONObject): UploadBatch {
+            require(o.keys().asSequence().toSet() == setOf("batch_id", "state"))
+            val id = o.text("batch_id"); val state = o.text("state")
+            require(Validation.id(id) && state in setOf("awaiting_acceptance", "accepted", "completed", "cancelled", "failed"))
+            return UploadBatch(id, state)
+        }
+    }
+}
+
+/** Validate the encoded JSON, including escaping, before opening a connection. */
+internal fun uploadManifest(files: List<UploadFile>): JSONObject {
+    require(files.size in 2..64) { "Selecciona entre 2 y 64 archivos para el lote." }
+    val body = JSONObject().put("files", JSONArray().also { a -> files.forEach { a.put(it.json()) } })
+    require(body.toString().toByteArray(Charsets.UTF_8).size <= 16384) { "Los nombres del lote superan el límite permitido." }
+    return body
+}
+
+class ProtocolException(val code: String, val status: Int = 0) : IllegalStateException("Error remoto")
 
 /** Dedicated TLS client; check pin, dates and PKIX before any HTTP data is sent. */
 class ProtocolClient(private val host: String, private val port: Int, pin: String, private val deviceId: String, private var credential: String? = null) {
@@ -133,7 +157,7 @@ class ProtocolClient(private val host: String, private val port: Int, pin: Strin
         req(path, method, body, auth).use { response ->
             val source = response.body.source(); source.request(16385); val bytes = source.readByteArray(minOf(source.buffer.size, 16385))
             require(bytes.size <= 16384)
-            val obj = strictObject(bytes); if (!response.isSuccessful) throw ProtocolException(obj.optJSONObject("error")?.optString("code") ?: "unknown")
+            val obj = strictObject(bytes); if (!response.isSuccessful) throw ProtocolException(obj.optJSONObject("error")?.optString("code") ?: "unknown", response.code)
             return obj
         }
     }
@@ -146,6 +170,14 @@ class ProtocolClient(private val host: String, private val port: Int, pin: Strin
         return Pairing(host, port, d.serverId, d.pin, deviceId, secret, serverName)
     }
     fun createUpload(name: String, size: Long): Transfer { require(Validation.name(name)); Validation.size(size.toString()); return Transfer.parse(json("transfers", "POST", JSONObject().put("file_name", name).put("size_bytes", size.toString()))) }
+    private fun batchPath(id: String): String { require(Validation.id(id)); return "upload-batches/$id" }
+    fun createUploadBatch(files: List<UploadFile>) = UploadBatch.parse(json("upload-batches", "POST", uploadManifest(files)))
+    fun batchStatus(id: String) = UploadBatch.parse(json(batchPath(id))).also { require(it.id == id) }
+    fun startBatchFile(id: String, index: Int): Transfer {
+        require(index in 0..63)
+        return Transfer.parse(json("${batchPath(id)}/start", "POST", JSONObject().put("index", index)))
+    }
+    fun cancelBatch(id: String) = UploadBatch.parse(json("${batchPath(id)}/cancel", "POST", JSONObject())).also { require(it.id == id) }
     fun offers(): List<Transfer> { val o = json("offers"); require(o.keys().asSequence().toSet() == setOf("transfers")); val a = o.getJSONArray("transfers"); require(a.length() <= 1); return (0 until a.length()).map { Transfer.parse(a.getJSONObject(it)).also { t -> require(t.direction == "download" && t.state == "awaiting_acceptance") } } }
     private fun path(id: String): String { require(Validation.id(id)); return "transfers/$id" }
     fun status(id: String) = Transfer.parse(json(path(id)))

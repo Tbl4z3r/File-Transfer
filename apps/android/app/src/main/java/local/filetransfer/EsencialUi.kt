@@ -168,6 +168,7 @@ internal fun EsencialScreen(
                             if (sendQueue != null) {
                                 val status = when {
                                     sendQueue.completed == sendQueue.total -> "Lote completado"
+                                    sendQueue.running && sendQueue.current == 0 -> "Esperando aceptación del lote"
                                     sendQueue.running -> "Archivo ${sendQueue.current} de ${sendQueue.total}"
                                     sendQueue.current > 0 -> "Lote detenido · archivo ${sendQueue.current} de ${sendQueue.total}"
                                     else -> "Lote detenido · ${sendQueue.total} archivos"

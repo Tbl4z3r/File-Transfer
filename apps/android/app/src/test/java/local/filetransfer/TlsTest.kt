@@ -22,7 +22,7 @@ import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 
 class TlsTest {
-    private fun certificate(name: String, expired: Boolean = false): HeldCertificate {
+    internal fun certificate(name: String, expired: Boolean = false): HeldCertificate {
         val pair = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
         val now = System.currentTimeMillis(); val dn = X500Name("CN=$name")
         val builder = JcaX509v3CertificateBuilder(dn, BigInteger.valueOf(now), Date(now - 86400000), Date(now + if (expired) -1000 else 86400000), dn, pair.public)
