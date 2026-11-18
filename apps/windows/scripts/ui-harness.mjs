@@ -204,6 +204,7 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
     peers: [],
     transfers: [],
     upload_batch: null,
+    download_batch: null,
     ...initial,
   };
   let now = 0,

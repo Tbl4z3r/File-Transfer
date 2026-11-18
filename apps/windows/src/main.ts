@@ -1,5 +1,5 @@
 import { encodePairingQr } from "./pairing-qr.js";
-type Peer = { id: string; name: string };
+type Peer = { id: string; name: string; supports_inbox: boolean };
 type Transfer = {
   transfer_id: string;
   direction: "upload" | "download";
@@ -18,7 +18,7 @@ type BatchFile = {
   transfer_id: string | null;
   state: string;
 };
-type UploadBatch = {
+type TransferBatch = {
   batch_id: string;
   peer_id: string;
   state: string;
@@ -36,7 +36,8 @@ type Snapshot = {
   receive_enabled: boolean;
   peers: Peer[];
   transfers: Transfer[];
-  upload_batch: UploadBatch | null;
+  upload_batch: TransferBatch | null;
+  download_batch: TransferBatch | null;
 };
 type Descriptor = {
   cert_sha256: string;
@@ -106,7 +107,9 @@ type SendBatch = {
 };
 let batch: SendBatch | null = null;
 let shownSendBatch: SendBatch | null = null;
-let shownUploadBatch: UploadBatch | null = null;
+let shownUploadBatch: TransferBatch | null = null;
+let shownDownloadBatch: TransferBatch | null = null;
+const peerNames = new Map<string, string>();
 let listSessionId: string | null = null;
 let batchListKey = "";
 let batchRows: { row: HTMLElement; name: HTMLElement; detail: HTMLElement }[] =
@@ -240,6 +243,7 @@ function advanceBatch(snapshot: Snapshot): void {
     !offering &&
     !busy &&
     !incomingReserved() &&
+    !outgoingReserved() &&
     !snapshot.transfers.some((t) => !terminal(t.state))
   )
     void sendNext(current);
@@ -355,7 +359,10 @@ function hideDescriptor(): void {
   if (panel.open) panel.close();
 }
 function peerName(id: string): string {
-  return latest?.peers.find((peer) => peer.id === id)?.name ?? "Dispositivo";
+  return (
+    latest?.peers.find((peer) => peer.id === id)?.name ??
+    peerNames.get(id) ?? "Dispositivo"
+  );
 }
 function stateLabel(t: Transfer): string {
   const labels: Record<string, string> = {
@@ -395,6 +402,7 @@ function updateControls(): void {
     !selectedPeer ||
     hasPending ||
     incomingReserved() ||
+    outgoingReserved() ||
     busy ||
     Boolean(batch) ||
     offering;
@@ -413,17 +421,21 @@ function updateControls(): void {
     ? "Inicia una sesión para conectar el móvil."
     : !latest?.peers.length
       ? "Muestra el QR para emparejar un móvil."
-      : batch
-        ? "Cada archivo necesita confirmación en el móvil. Puedes cancelar el lote completo."
-        : incomingReserved()
-          ? latest?.upload_batch?.state === "awaiting_acceptance"
-            ? "Revisa los archivos del lote y acéptalo o recházalo aquí."
-            : "Recibiendo el lote autorizado. Puedes cancelar los archivos pendientes."
-          : hasPending
-            ? "Termina o cancela la transferencia actual para enviar otra."
-            : latest.receive_enabled
-              ? "Disponible para recibir. Autoriza cada archivo o lote aquí."
-              : "Elige un dispositivo para enviar o activa Recibir.";
+      : outgoingReserved()
+        ? latest?.download_batch?.state === "awaiting_acceptance"
+          ? "Esperando aceptación en el móvil. Puedes cancelar el lote completo."
+          : "Enviando el lote autorizado. Puedes cancelar los archivos pendientes."
+        : batch
+          ? "Cada archivo necesita confirmación en el móvil. Puedes cancelar el lote completo."
+          : incomingReserved()
+            ? latest?.upload_batch?.state === "awaiting_acceptance"
+              ? "Revisa los archivos del lote y acéptalo o recházalo aquí."
+              : "Recibiendo el lote autorizado. Puedes cancelar los archivos pendientes."
+            : hasPending
+              ? "Termina o cancela la transferencia actual para enviar otra."
+              : latest.receive_enabled
+                ? "Disponible para recibir. Autoriza cada archivo o lote aquí."
+                : "Elige un dispositivo para enviar o activa Recibir.";
   $("folder-label").textContent =
     selectedDestination ?? "Se elige al aceptar cada archivo";
   $("folder-hint").textContent = selectedDestination
@@ -446,6 +458,9 @@ function updateControls(): void {
 }
 function incomingReserved(): boolean {
   return Boolean(latest?.upload_batch && !terminal(latest.upload_batch.state));
+}
+function outgoingReserved(): boolean {
+  return Boolean(latest?.download_batch && !terminal(latest.download_batch.state));
 }
 function batchFileLabel(
   file: BatchFile,
@@ -473,14 +488,17 @@ function batchFileLabel(
 }
 function renderBatch(): void {
   const incoming = shownUploadBatch;
+  const download = shownDownloadBatch;
   const outgoing = shownSendBatch;
-  const files = incoming?.files ?? outgoing?.sources ?? [];
-  const state = incoming?.state ?? outgoing?.state ?? "";
+  const files = incoming?.files ?? download?.files ?? outgoing?.sources ?? [];
+  const state = incoming?.state ?? download?.state ?? outgoing?.state ?? "";
   const key = incoming
     ? `in/${incoming.batch_id}`
-    : outgoing
-      ? `out/${outgoing.sessionId}/${outgoing.sources[0]?.source}`
-      : "";
+    : download
+      ? `download/${download.batch_id}`
+      : outgoing
+        ? `out/${outgoing.sessionId}/${outgoing.sources[0]?.source}`
+        : "";
   const waiting = Boolean(incoming && state === "awaiting_acceptance");
   $("batch-panel").classList.toggle("hidden", !files.length);
   const accept = $<HTMLButtonElement>("accept-batch");
@@ -488,12 +506,14 @@ function renderBatch(): void {
   accept.hidden = !waiting;
   accept.disabled = busy || !waiting || !incomingReserved();
   cancel.hidden = !files.length || terminal(state);
-  cancel.disabled = busy || terminal(state) || (!incoming && !batch);
+  cancel.disabled = busy || terminal(state) || (!incoming && !download && !batch);
   cancel.textContent = waiting ? "Rechazar lote" : "Cancelar lote";
   const completed = files.filter((f) => f.state === "completed").length;
   const label =
     state === "awaiting_acceptance"
-      ? "Solicitud entrante"
+      ? incoming
+        ? "Solicitud entrante"
+        : "Esperando aceptación en el móvil"
       : state === "completed"
         ? "Lote completado"
         : state === "failed"
@@ -503,11 +523,13 @@ function renderBatch(): void {
             : "Lote en curso";
   $("batch-status").textContent = incoming
     ? `${label} · ${files.length} archivos · ${completed} verificados · ${peerName(incoming.peer_id)}`
-    : outgoing
-      ? terminal(state)
-        ? `${label} · ${completed} de ${files.length} verificados · ${peerName(outgoing.peerId)}`
-        : `Archivo ${outgoing.index + 1} de ${files.length} · ${files.length - outgoing.index - 1} pendientes · ${peerName(outgoing.peerId)}`
-      : "";
+    : download
+      ? `${label} · ${files.length} archivos · ${completed} verificados · ${peerName(download.peer_id)}`
+      : outgoing
+        ? terminal(state)
+          ? `${label} · ${completed} de ${files.length} verificados · ${peerName(outgoing.peerId)}`
+          : `Archivo ${outgoing.index + 1} de ${files.length} · ${files.length - outgoing.index - 1} pendientes · ${peerName(outgoing.peerId)}`
+        : "";
   const list = $("batch-files");
   if (batchListKey !== key || batchRows.length !== files.length) {
     batchListKey = key;
@@ -558,6 +580,17 @@ async function cancelIncomingBatch(): Promise<void> {
       batchId: pending.batch_id,
     });
     offerRevision++;
+  });
+}
+async function cancelOutgoingBatch(): Promise<void> {
+  const pending = latest?.download_batch;
+  if (!pending || terminal(pending.state)) return;
+  await action(async () => {
+    await invoke<BatchStatus>("cancel_download_batch", {
+      batchId: pending.batch_id,
+    });
+    offerRevision++;
+    notice("Lote cancelado. Los archivos pendientes no se enviarán.");
   });
 }
 async function acceptTransfer(t: Transfer): Promise<void> {
@@ -630,10 +663,9 @@ function transferView(detailed: boolean): TransferView {
           ? (messages[t.error_code ?? ""] ??
             "La transferencia se interrumpió. Vuelve a enviarla.")
           : "";
-      const inBatch =
-        latest?.upload_batch?.files.some(
-          (f) => f.transfer_id === t.transfer_id,
-        ) ?? false;
+      const inBatch = [latest?.upload_batch, latest?.download_batch].some(
+        (manifest) => manifest?.files.some((f) => f.transfer_id === t.transfer_id),
+      );
       const signature = `${t.transfer_id}/${t.state}/${Boolean(selectedDestination)}/${inBatch}`;
       if (signature !== actionSignature) {
         actionSignature = signature;
@@ -806,20 +838,46 @@ async function refresh(): Promise<void> {
     const snapshot = await invoke<Snapshot>("snapshot");
     if (revision !== offerRevision) return; // An offer completed after this snapshot was requested.
     const sessionId = snapshot.session?.session_id ?? null;
+    // Only compare consecutive snapshots belonging to the same active session.
+    const disappeared =
+      sessionId && latest?.session?.session_id === sessionId
+        ? latest.peers.filter(
+            (peer) => !snapshot.peers.some((next) => next.id === peer.id),
+          )
+        : [];
     if (sessionId !== listSessionId) {
       if (batch && batch.sessionId !== sessionId) discardBatch();
       shownSendBatch = null;
       shownUploadBatch = null;
+      shownDownloadBatch = null;
+      selectedDestination = null;
+      peerNames.clear();
+      samples.clear();
+      speeds.clear();
+      hideDescriptor();
       listSessionId = sessionId;
     }
     latest = snapshot;
-    if (snapshot.upload_batch) {
+    for (const peer of snapshot.peers) peerNames.set(peer.id, peer.name);
+    if (sessionId && snapshot.upload_batch) {
       if (
         !terminal(snapshot.upload_batch.state) ||
-        !shownSendBatch ||
+        (!shownSendBatch && !shownDownloadBatch) ||
         shownUploadBatch?.batch_id === snapshot.upload_batch.batch_id
-      )
+      ) {
         shownUploadBatch = snapshot.upload_batch;
+        if (!terminal(snapshot.upload_batch.state)) shownDownloadBatch = null;
+      }
+    }
+    if (sessionId && snapshot.download_batch) {
+      if (
+        !terminal(snapshot.download_batch.state) ||
+        (!shownSendBatch && !shownUploadBatch) ||
+        shownDownloadBatch?.batch_id === snapshot.download_batch.batch_id
+      ) {
+        shownDownloadBatch = snapshot.download_batch;
+        if (!terminal(snapshot.download_batch.state)) shownUploadBatch = null;
+      }
     }
     const active = latest.session !== null;
     $("session-badge").textContent = active
@@ -881,6 +939,10 @@ async function refresh(): Promise<void> {
           });
       }
     advanceBatch(latest);
+    if (disappeared.length)
+      notice(
+        `${disappeared.map((peer) => peer.name).join(", ")} ${disappeared.length === 1 ? "se ha desconectado" : "se han desconectado"}. Para volver a conectar, muestra un nuevo QR y escanéalo en el móvil.`,
+      );
     updateControls();
   } finally {
     refreshing = false;
@@ -901,10 +963,15 @@ $("stop-session").onclick = () => {
     hideDescriptor();
     discardBatch();
     await invoke("stop_session");
+    offerRevision++;
+    shownSendBatch = null;
+    shownUploadBatch = null;
+    shownDownloadBatch = null;
+    selectedPeer = "";
     selectedDestination = null;
     $<HTMLDialogElement>("settings-panel").close();
     notice(
-      "Sesión cerrada. Las transferencias pendientes se han cancelado y se han eliminado sus parciales.",
+      "Sesión cerrada. Los móviles necesitan un nuevo QR para volver a conectar. Las transferencias pendientes se han cancelado y se han eliminado sus parciales.",
     );
   });
 };
@@ -923,17 +990,36 @@ $("send-file").onclick = () => {
   void action(async () => {
     const peerId = selectedPeer;
     const sessionId = latest?.session?.session_id;
-    if (!peerId || !sessionId || batch || offering || incomingReserved())
-      return;
+    if (
+      !peerId || !sessionId || batch || offering ||
+      incomingReserved() || outgoingReserved()
+    ) return;
     const sources = await invoke<Source[] | null>("choose_sources");
     if (!sources?.length) return;
     if (
       latest?.session?.session_id !== sessionId ||
       !latest.peers.some((peer) => peer.id === peerId) ||
       incomingReserved() ||
+      outgoingReserved() ||
       latest.transfers.some((t) => !terminal(t.state))
     )
       return;
+    if (
+      sources.length > 1 &&
+      latest.peers.find((peer) => peer.id === peerId)?.supports_inbox
+    ) {
+      await invoke<BatchStatus>("offer_download_batch", {
+        peerId,
+        sources: sources.map((source) => source.source),
+        sessionId,
+      });
+      offerRevision++;
+      shownSendBatch = null;
+      shownUploadBatch = null;
+      notice("Oferta de lote enviada. Esperando aceptación en el móvil.");
+      return;
+    }
+    shownDownloadBatch = null;
     batch = {
       peerId,
       sessionId,
@@ -959,6 +1045,8 @@ $("accept-batch").onclick = () => {
 $("cancel-batch").onclick = () => {
   if (shownUploadBatch && !terminal(shownUploadBatch.state))
     void cancelIncomingBatch();
+  else if (shownDownloadBatch && !terminal(shownDownloadBatch.state))
+    void cancelOutgoingBatch();
   else void cancelBatch();
 };
 $("pair").onclick = () => {
