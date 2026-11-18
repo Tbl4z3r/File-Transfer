@@ -1,6 +1,6 @@
 {
   "name": "file-transfer-windows",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "packageManager": "npm@11.9.0",
@@ -8,7 +8,8 @@
     "build": "tsc --project tsconfig.json && node build.mjs",
     "dev": "npm run build && tauri dev",
     "tauri": "tauri",
-    "test:qr": "npm run build && node --test scripts/pairing-qr.test.mjs"
+    "test:qr": "npm run build && node --test scripts/pairing-qr.test.mjs",
+    "test:ui": "npm run build && node --test scripts/pairing-qr.test.mjs scripts/desktop-ui.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.5",

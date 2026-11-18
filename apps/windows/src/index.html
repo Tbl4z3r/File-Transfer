@@ -1,19 +1,319 @@
 <!doctype html>
 <html lang="es">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>File Transfer</title><link rel="stylesheet" href="./style.css"></head>
-<body>
-  <main class="app">
-    <header><a class="brand" href="#"><span class="brand-icon">⇄</span><span>File Transfer<small>Tus archivos, cerca de ti</small></span></a><span id="session-badge" class="badge">Sesión cerrada</span></header>
-    <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
-    <section class="intro"><span class="eyebrow">EN TU RED LOCAL</span><h1>De un dispositivo<br>a otro. Así de simple.</h1><p>Envía y recibe archivos con tu Android mediante una conexión cifrada y verificada.</p></section>
-    <section class="panel connection" aria-labelledby="connection-title"><div><h2 id="connection-title">Conexión del PC</h2><p>Introduce la IPv4 del PC en la misma red que tu móvil. La sesión permanece abierta hasta que la cierres.</p></div><form id="session-form"><label>IPv4 del PC<input id="bind-ip" placeholder="192.168.1.20" required inputmode="decimal" autocomplete="off"></label><label class="port">Puerto<input id="port" type="number" min="1024" max="65535" value="51337" required></label><button id="start-session" class="primary" type="submit">Iniciar sesión</button><button id="stop-session" class="hidden" type="button">Cerrar sesión</button></form><p id="connection-hint" class="hint">Usa una red privada. Si el firewall lo solicita, permite la conexión en esa red.</p></section>
-    <div class="columns">
-      <section class="panel action-panel"><div class="section-icon">↑</div><h2>Enviar archivos</h2><p>Elige un dispositivo emparejado y un archivo. El móvil decidirá si acepta recibirlo.</p><label>Dispositivo de destino<select id="peer-select"><option value="">Empareja un dispositivo primero</option></select></label><button id="choose-file" class="file-picker" type="button">＋ Elegir archivo</button><span id="selected-file" class="file-label">Ningún archivo seleccionado</span><button id="send-file" class="primary wide" type="button" disabled>Enviar al dispositivo</button></section>
-      <section class="panel action-panel"><div class="section-icon">↓</div><h2>Recibir archivos</h2><p>Activa la recepción para ver solicitudes del móvil. Elegirás dónde guardar cada archivo.</p><label class="switch-row"><span>Disponible para recibir<small>Siempre te pediremos autorización</small></span><input id="receive" type="checkbox" role="switch" disabled></label><div class="pair-area"><h3>Conectar un nuevo dispositivo</h3><p>Comparte los datos solo con tu móvil, mirando ambas pantallas.</p><button id="pair" type="button" disabled>Mostrar QR de conexión</button></div></section>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>File Transfer</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <svg
+      class="icon-definitions"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <defs>
+        <symbol id="icon-transfer" viewBox="0 0 24 24">
+          <path d="M4 7h16m-4-4 4 4-4 4M20 17H4m4-4-4 4 4 4" />
+        </symbol>
+        <symbol id="icon-home" viewBox="0 0 24 24">
+          <path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-8H9v8H4a1 1 0 0 1-1-1Z" />
+        </symbol>
+        <symbol id="icon-list" viewBox="0 0 24 24">
+          <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />
+        </symbol>
+        <symbol id="icon-phone" viewBox="0 0 24 24">
+          <rect x="6" y="2" width="12" height="20" rx="2" />
+          <path d="M11 18h2" />
+        </symbol>
+        <symbol id="icon-settings" viewBox="0 0 24 24">
+          <path
+            d="M4 4v5m0 4v7M12 4v9m0 4v3M20 4v1m0 4v11M1 9h6M9 17h6M17 5h6"
+          />
+        </symbol>
+        <symbol id="icon-qr" viewBox="0 0 24 24">
+          <path
+            d="M3 3h6v6H3zM15 3h6v6h-6zM3 15h6v6H3zM15 15h2v2h-2zM21 13v4h-2v4h-4v-2h-2M13 3v4m0 4v2H9m-6-2v2h4m4 4v4m10 0h.01"
+          />
+        </symbol>
+        <symbol id="icon-folder" viewBox="0 0 24 24">
+          <path
+            d="M3 8V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v2M3 8h16a2 2 0 0 1 2 3l-3 9H4L2 11a2 2 0 0 1 1-3Z"
+          />
+        </symbol>
+        <symbol id="icon-file" viewBox="0 0 24 24">
+          <path d="M14 2H5v20h14V7Zm0 0v6h5M8 13h8M8 17h6" />
+        </symbol>
+        <symbol id="icon-up" viewBox="0 0 24 24">
+          <path d="M6 18 18 6M6 6h12v12" />
+        </symbol>
+        <symbol id="icon-down" viewBox="0 0 24 24">
+          <path d="M18 6 6 18M6 6v12h12" />
+        </symbol>
+        <symbol id="icon-check" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="9" />
+          <path d="m8 12 3 3 5-6" />
+        </symbol>
+        <symbol id="icon-close" viewBox="0 0 24 24">
+          <path d="m6 6 12 12M6 18 18 6" />
+        </symbol>
+      </defs>
+    </svg>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-icon"
+            ><svg class="icon" aria-hidden="true">
+              <use href="#icon-transfer" /></svg
+          ></span>
+          <h1>File Transfer</h1>
+        </div>
+        <div class="header-actions">
+          <span id="session-badge" class="session-status">Sesión cerrada</span
+          ><button id="pair" class="qr-button" type="button" disabled>
+            <svg class="icon" aria-hidden="true"><use href="#icon-qr" /></svg
+            >Mostrar QR
+          </button>
+        </div>
+      </header>
+      <nav class="rail" aria-label="Accesos de File Transfer">
+        <button
+          id="home"
+          class="icon-button"
+          type="button"
+          aria-label="Inicio"
+          aria-current="page"
+        >
+          <svg class="icon" aria-hidden="true"><use href="#icon-home" /></svg
+          ><span class="tooltip" aria-hidden="true">Inicio</span>
+        </button>
+        <button
+          id="open-activity"
+          class="icon-button"
+          type="button"
+          aria-label="Actividad"
+        >
+          <svg class="icon" aria-hidden="true"><use href="#icon-list" /></svg
+          ><span class="tooltip" aria-hidden="true">Actividad</span>
+        </button>
+        <button
+          id="open-devices"
+          class="icon-button"
+          type="button"
+          aria-label="Dispositivos"
+        >
+          <svg class="icon" aria-hidden="true"><use href="#icon-phone" /></svg
+          ><span class="tooltip" aria-hidden="true">Dispositivos</span>
+        </button>
+        <button
+          id="open-settings"
+          class="icon-button"
+          type="button"
+          aria-label="Ajustes"
+        >
+          <svg class="icon" aria-hidden="true">
+            <use href="#icon-settings" /></svg
+          ><span class="tooltip" aria-hidden="true">Ajustes</span>
+        </button>
+      </nav>
+      <main id="home-content" class="main-content" tabindex="-1">
+        <div
+          id="notice"
+          class="notice hidden"
+          role="status"
+          aria-live="polite"
+        ></div>
+        <section
+          id="session-setup"
+          class="panel connection"
+          aria-labelledby="connection-title"
+        >
+          <h2 id="connection-title">Conexión del PC</h2>
+          <p>Introduce la IPv4 de este PC en la misma red que tu móvil.</p>
+          <form id="session-form">
+            <label
+              >IPv4 del PC<input
+                id="bind-ip"
+                placeholder="192.168.1.20"
+                required
+                inputmode="decimal"
+                autocomplete="off" /></label
+            ><label class="port"
+              >Puerto<input
+                id="port"
+                type="number"
+                min="1024"
+                max="65535"
+                value="51337"
+                required /></label
+            ><button id="start-session" class="primary" type="submit">
+              Iniciar sesión
+            </button>
+          </form>
+          <p class="hint">
+            Usa una red privada. Si el firewall lo solicita, permite la conexión
+            en esa red.
+          </p>
+        </section>
+        <section class="current">
+          <h2>Transferencia actual</h2>
+          <div id="current-transfer" class="transfer-list">
+            <div class="panel empty-state">
+              <p>Sin transferencias en curso.</p>
+            </div>
+          </div>
+        </section>
+        <section class="devices">
+          <h2>Dispositivos</h2>
+          <div id="device-choices" class="device-list">
+            <p>Ningún dispositivo emparejado.</p>
+          </div>
+        </section>
+        <section class="actions" aria-label="Enviar y recibir">
+          <button id="send-file" class="primary" type="button" disabled>
+            <svg class="icon" aria-hidden="true"><use href="#icon-up" /></svg
+            >Enviar archivo</button
+          ><button id="receive" type="button" aria-pressed="false" disabled>
+            <svg class="icon" aria-hidden="true"><use href="#icon-down" /></svg
+            ><span id="receive-label">Recibir</span>
+          </button>
+          <p id="action-hint" class="hint">
+            Inicia una sesión para conectar el móvil.
+          </p>
+        </section>
+        <section class="folder row" aria-label="Carpeta de recepción">
+          <span class="icon-tile"
+            ><svg class="icon" aria-hidden="true">
+              <use href="#icon-folder" /></svg
+          ></span>
+          <div class="grow">
+            <h2 class="quiet-label">Carpeta de recepción</h2>
+            <p id="folder-label">Se elige al aceptar cada archivo</p>
+            <p id="folder-hint" class="hint">
+              Puedes elegir una carpeta para esta sesión.
+            </p>
+          </div>
+          <button id="choose-folder" class="text-button" type="button" disabled>
+            Elegir
+          </button>
+        </section>
+        <section class="recent">
+          <div class="row section-heading">
+            <h2>Esta sesión</h2>
+            <button id="all-activity" class="text-button" type="button">
+              Ver todo
+            </button>
+          </div>
+          <div id="recent-transfer"><p>Todavía no hay actividad.</p></div>
+        </section>
+      </main>
     </div>
-    <section id="pair-panel" class="panel hidden"><div class="row"><h2>Escanear para conectar</h2><button id="hide-pair" class="quiet" type="button">Ocultar</button></div><p>En Android pulsa «Escanear QR» y apunta a este código. Escanea únicamente el QR mostrado por este PC. Válido durante <strong id="pair-seconds">120</strong> segundos.</p><div class="qr-area"><img id="pair-qr" class="hidden" alt="Código QR temporal para conectar tu Android"><p id="qr-error" class="hidden failed" role="status">No se pudo generar el QR. Usa los datos de conexión manuales de abajo o vuelve a intentarlo.</p></div><code id="fingerprint"></code><textarea id="descriptor" readonly rows="5" aria-label="Descriptor de emparejamiento" spellcheck="false"></textarea><button id="copy-pair" type="button">Copiar JSON para conexión manual</button></section>
-    <section class="activity"><div class="row"><h2>Transferencias</h2><span class="subtle">Solo mientras la sesión está activa</span></div><div id="transfers" class="transfer-list"><div class="empty-state"><span>↗</span><h3>Todo listo para compartir</h3><p>Tus transferencias aparecerán aquí.</p></div></div></section>
-    <section class="panel peers-panel"><h2>Dispositivos emparejados</h2><div id="peers"><p class="subtle">Todavía no has emparejado ningún dispositivo.</p></div></section>
-    <footer>Sin cuentas ni servicios remotos · QR y conexión manual · Un archivo cada vez</footer>
-  </main><script type="module" src="./main.js"></script>
-</body></html>
+    <dialog id="activity-panel" aria-labelledby="activity-title">
+      <div class="dialog-heading">
+        <h2 id="activity-title">Actividad de la sesión</h2>
+        <button
+          class="icon-button"
+          type="button"
+          data-close="activity-panel"
+          aria-label="Cerrar actividad"
+        >
+          <svg class="icon" aria-hidden="true"><use href="#icon-close" /></svg>
+        </button>
+      </div>
+      <p class="dialog-notice hidden" role="status" aria-live="polite"></p>
+      <div id="transfers" class="transfer-list">
+        <div class="empty-state"><p>Todavía no hay actividad.</p></div>
+      </div>
+    </dialog>
+    <dialog id="devices-panel" aria-labelledby="devices-title">
+      <div class="dialog-heading">
+        <h2 id="devices-title">Dispositivos emparejados</h2>
+        <button
+          class="icon-button"
+          type="button"
+          data-close="devices-panel"
+          aria-label="Cerrar dispositivos"
+        >
+          <svg class="icon" aria-hidden="true"><use href="#icon-close" /></svg>
+        </button>
+      </div>
+      <p class="dialog-notice hidden" role="status" aria-live="polite"></p>
+      <p>
+        Revocar impide nuevas conexiones y cancela las transferencias de ese
+        dispositivo.
+      </p>
+      <div id="peers"></div>
+    </dialog>
+    <dialog id="settings-panel" aria-labelledby="settings-title">
+      <div class="dialog-heading">
+        <h2 id="settings-title">Ajustes</h2>
+        <button
+          class="icon-button"
+          type="button"
+          data-close="settings-panel"
+          aria-label="Cerrar ajustes"
+        >
+          <svg class="icon" aria-hidden="true"><use href="#icon-close" /></svg>
+        </button>
+      </div>
+      <p class="dialog-notice hidden" role="status" aria-live="polite"></p>
+      <h3>Conexión del PC</h3>
+      <p id="session-address">Sesión cerrada.</p>
+      <p>
+        La sesión permanece abierta hasta que la cierres. Cerrar cancela las
+        transferencias pendientes y elimina sus parciales.
+      </p>
+      <button id="stop-session" type="button" disabled>Cerrar sesión</button>
+      <h3>Recepción</h3>
+      <p id="receive-setting">La recepción está desactivada.</p>
+      <p>
+        Cada archivo requiere tu autorización. La carpeta elegida se usa para
+        las siguientes aceptaciones de esta sesión.
+      </p>
+    </dialog>
+    <dialog id="pair-panel" aria-labelledby="pair-title">
+      <div class="dialog-heading">
+        <h2 id="pair-title">Escanear para conectar</h2>
+        <button
+          id="hide-pair"
+          class="icon-button"
+          type="button"
+          aria-label="Cerrar código QR"
+        >
+          <svg class="icon" aria-hidden="true"><use href="#icon-close" /></svg>
+        </button>
+      </div>
+      <p class="dialog-notice hidden" role="status" aria-live="polite"></p>
+      <p>
+        En Android pulsa «Escanear QR del PC» y apunta a este código. Comparte
+        estos datos solo con tu móvil, mirando ambas pantallas. Válido durante
+        <strong id="pair-seconds">120</strong> segundos.
+      </p>
+      <div class="qr-area">
+        <img
+          id="pair-qr"
+          class="hidden"
+          alt="Código QR temporal para conectar tu Android"
+        />
+        <p id="qr-error" class="hidden failed" role="status">
+          No se pudo generar el QR. Usa la conexión manual o vuelve a
+          intentarlo.
+        </p>
+      </div>
+      <details id="manual-pair">
+        <summary>Conexión manual</summary>
+        <code id="fingerprint"></code
+        ><textarea
+          id="descriptor"
+          readonly
+          rows="5"
+          aria-label="Descriptor de emparejamiento"
+          spellcheck="false"
+        ></textarea
+        ><button id="copy-pair" type="button">Copiar datos de conexión</button>
+      </details>
+    </dialog>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
