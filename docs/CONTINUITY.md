@@ -2,7 +2,7 @@
 
 ## Dirección y ramas
 
-Por instrucción posterior del usuario, **GPT-6.1 Sol** coordina arquitectura, revisión e integración. Las aprobaciones históricas de Astra se conservan como evidencia. Delegación actual: Luna para tareas acotadas de validación/documentación; el orquestador revisa cambios sensibles. Máximo dos implementadores simultáneos.
+Por instrucción posterior del usuario, **GPT-6.2** coordina arquitectura, revisión e integración. Se conservan las revisiones históricas. Delegación actual: Luna para tareas acotadas de validación/documentación. El orquestador revisa cambios sensibles. Máximo dos implementadores simultáneos.
 
 `prueba` reúne el estado actual solicitado por el usuario. `main` conserva la base H0 hasta aceptar una versión de aplicación. No declarar H1 completo sin las pruebas esenciales de hardware y rendimiento LAN descritas en `TESTING.md`. H2–H5 siguen pendientes.
 
@@ -33,4 +33,4 @@ El usuario comprobó conexión en Redmi Note 14 5G; no en J4+. Reportó recepci�
 
 ## Conexión QR anticipada
 
-El usuario pidió QR antes de continuar la prueba J4+, porque copiar el JSON mediante WhatsApp no resulta viable allí. Windows 0.1.1 + Android 0.1.2 añaden esta parte de H2 sin mDNS ni cambios remotos: QR con JSON v1 exacto, cámara con permiso al pulsar, decoder local sin GMS y validación/TLS existentes. No se adoptó la alternativa insegura de confiar solo en IP/puerto. Ver ADR003, reportes qr-windows/qr-android y verificador cruzado de imagen. La cámara real del J4+ sigue pendiente; no dar H2 ni la compatibilidad física por completos.
+El usuario pidió QR antes de continuar la prueba J4+, porque copiar el JSON mediante WhatsApp no resulta viable allí. Windows 0.1.1 y Android 0.1.2 añadieron el QR con JSON v1 exacto, cámara con permiso al pulsar, lector local sin GMS y validación TLS. Ver ADR003, informes qr-windows/qr-android y verificador cruzado de imagen. El usuario confirmó la lectura y la transferencia en ambos sentidos en Redmi Note 14 5G y Galaxy J4+. Consulta el [registro de la prueba](reviews/manual-redmi-j4-2026-11-17.md) para conocer su alcance. H2 todavía requiere descubrimiento mDNS.
