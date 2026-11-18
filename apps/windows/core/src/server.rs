@@ -1,4 +1,4 @@
-use crate::{ActiveSession, Engine, model::*};
+use crate::{ActiveSession, AuthenticatedPeer, Engine, model::*};
 use axum::{
     body::{Body, Bytes},
     http::{HeaderMap, Method, Request, Response, StatusCode, header},
@@ -112,6 +112,7 @@ pub(crate) async fn start(
     inner.receive = false;
     inner.records.clear();
     inner.upload_batch = None;
+    inner.download_batch = None;
     inner.window = None;
     drop(inner);
     let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -275,6 +276,13 @@ async fn route(engine: Arc<Engine>, request: Request<Body>) -> Result<Response<B
         "batch_create"
     } else if path.starts_with("/v1/upload-batches/") {
         "batch"
+    } else if path.starts_with("/v1/download-batches/") {
+        "download_batch"
+    } else if path == "/v1/inbox" {
+        "inbox"
+    } else if path == "/v1/disconnect" {
+        expected_method = Method::POST;
+        "disconnect"
     } else if path == "/v1/offers" {
         "offers"
     } else if path.starts_with("/v1/transfers/") {
@@ -282,7 +290,11 @@ async fn route(engine: Arc<Engine>, request: Request<Body>) -> Result<Response<B
     } else {
         return Err(Fault::new(404, "not_found"));
     };
-    if route != "transfer" && route != "batch" && method != expected_method {
+    if route != "transfer"
+        && route != "batch"
+        && route != "download_batch"
+        && method != expected_method
+    {
         return Err(Fault::new(405, "method_not_allowed"));
     }
     if route == "pair" {
@@ -295,6 +307,56 @@ async fn route(engine: Arc<Engine>, request: Request<Body>) -> Result<Response<B
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or(""),
     )?;
+    if route == "disconnect" {
+        parse_json::<Empty>(request, engine.timeouts.headers).await?;
+        engine.disconnect(&peer)?;
+        return Ok(json_response(
+            200,
+            &serde_json::json!({"disconnected":true}),
+        ));
+    }
+    if route == "inbox" {
+        return Ok(json_response(200, &engine.inbox(&peer)?));
+    }
+    if route == "download_batch" {
+        let pieces: Vec<_> = path
+            .trim_start_matches("/v1/download-batches/")
+            .split('/')
+            .collect();
+        if pieces.len() > 2 || !valid_id(pieces[0]) {
+            return Err(Fault::new(404, "not_found"));
+        }
+        let id = pieces[0];
+        let status = engine.download_batch_status(&peer, id)?;
+        return match pieces.get(1).copied().unwrap_or("") {
+            "" if method == Method::GET => Ok(json_response(200, &status)),
+            "accept" if method == Method::POST => {
+                parse_json::<Empty>(request, engine.timeouts.headers).await?;
+                Ok(json_response(
+                    200,
+                    &engine.accept_download_batch(&peer, id)?,
+                ))
+            }
+            "start" if method == Method::POST => {
+                let data =
+                    parse_json::<crate::upload_batch::StartBatch>(request, engine.timeouts.headers)
+                        .await?;
+                Ok(json_response(
+                    200,
+                    &engine.start_download_batch(&peer, id, data.index)?,
+                ))
+            }
+            "cancel" if method == Method::POST => {
+                parse_json::<Empty>(request, engine.timeouts.headers).await?;
+                Ok(json_response(
+                    200,
+                    &engine.cancel_download_batch_remote(&peer, id)?,
+                ))
+            }
+            "" | "accept" | "start" | "cancel" => Err(Fault::new(405, "method_not_allowed")),
+            _ => Err(Fault::new(404, "not_found")),
+        };
+    }
     if route == "batch_create" {
         let data = parse_json::<crate::upload_batch::CreateBatch>(request, engine.timeouts.headers)
             .await?;
@@ -383,7 +445,7 @@ async fn route(engine: Arc<Engine>, request: Request<Body>) -> Result<Response<B
 }
 async fn upload(
     engine: Arc<Engine>,
-    peer: &str,
+    peer: &AuthenticatedPeer,
     id: &str,
     request: Request<Body>,
 ) -> Result<Response<Body>> {
@@ -423,7 +485,7 @@ async fn upload(
 }
 async fn write_upload(
     engine: &Engine,
-    peer: &str,
+    peer: &AuthenticatedPeer,
     id: &str,
     body: Body,
     mut file: tokio::fs::File,
@@ -456,10 +518,14 @@ async fn write_upload(
     engine.progress(peer, id, count)?;
     engine.finish_stream(peer, id, format!("{:x}", hash.finalize()))
 }
-async fn download(engine: Arc<Engine>, peer: &str, id: &str) -> Result<Response<Body>> {
+async fn download(
+    engine: Arc<Engine>,
+    peer: &AuthenticatedPeer,
+    id: &str,
+) -> Result<Response<Body>> {
     let (file, cancel, expected) = engine.claim_stream(peer, id, Direction::Download)?;
     let (sender, receiver) = mpsc::channel::<std::result::Result<Bytes, io::Error>>(1);
-    let owner = peer.to_owned();
+    let owner = peer.clone();
     let transfer = id.to_owned();
     tokio::spawn(async move {
         let result = read_download(
@@ -487,7 +553,7 @@ async fn download(engine: Arc<Engine>, peer: &str, id: &str) -> Result<Response<
 }
 async fn read_download(
     engine: &Engine,
-    peer: &str,
+    peer: &AuthenticatedPeer,
     id: &str,
     mut file: tokio::fs::File,
     cancel: &CancellationToken,

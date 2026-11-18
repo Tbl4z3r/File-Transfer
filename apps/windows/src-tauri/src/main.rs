@@ -76,6 +76,21 @@ fn offer_download(
         .map_err(|e| e.code.to_owned())
 }
 #[tauri::command]
+fn offer_download_batch(
+    core: Core<'_>,
+    peer_id: String,
+    sources: Vec<PathBuf>,
+    session_id: String,
+) -> Result<BatchStatus, String> {
+    core.offer_download_batch(&peer_id, sources, &session_id)
+        .map_err(|e| e.code.to_owned())
+}
+#[tauri::command]
+fn cancel_download_batch(core: Core<'_>, batch_id: String) -> Result<BatchStatus, String> {
+    core.cancel_download_batch(&batch_id)
+        .map_err(|e| e.code.to_owned())
+}
+#[tauri::command]
 fn cancel_transfer(core: Core<'_>, transfer_id: String) -> Result<Transfer, String> {
     core.cancel(&transfer_id).map_err(|e| e.code.to_owned())
 }
@@ -129,7 +144,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let directory = app.path().app_data_dir()?;
-            let core = Engine::open(directory, "PC personal")?;
+            let core = Engine::open_ephemeral(directory, "PC personal")?;
             app.manage(core);
             Ok(())
         })
@@ -152,6 +167,8 @@ fn main() {
             accept_upload_batch,
             cancel_upload_batch,
             offer_download,
+            offer_download_batch,
+            cancel_download_batch,
             cancel_transfer,
             choose_sources,
             choose_destination
