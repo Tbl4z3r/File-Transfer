@@ -35,6 +35,7 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
       this.value = "";
       this.disabled = false;
       this.hidden = false;
+      this.scrollTop = 0;
       this.listeners = new Map();
       this._text = "";
       this._class = "";
@@ -202,6 +203,7 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
     receive_enabled: false,
     peers: [],
     transfers: [],
+    upload_batch: null,
     ...initial,
   };
   let now = 0,

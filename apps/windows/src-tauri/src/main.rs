@@ -79,8 +79,14 @@ fn offer_download(
 fn cancel_transfer(core: Core<'_>, transfer_id: String) -> Result<Transfer, String> {
     core.cancel(&transfer_id).map_err(|e| e.code.to_owned())
 }
+#[derive(serde::Serialize)]
+struct ChosenSource {
+    source: PathBuf,
+    file_name: String,
+    size_bytes: String,
+}
 #[tauri::command]
-async fn choose_sources(app: tauri::AppHandle) -> Result<Option<Vec<PathBuf>>, String> {
+async fn choose_sources(app: tauri::AppHandle) -> Result<Option<Vec<ChosenSource>>, String> {
     app.dialog()
         .file()
         .set_title("Elige los archivos que quieres enviar")
@@ -88,7 +94,23 @@ async fn choose_sources(app: tauri::AppHandle) -> Result<Option<Vec<PathBuf>>, S
         .map(|paths| {
             paths
                 .into_iter()
-                .map(|p| p.into_path().map_err(|_| "io_error".to_owned()))
+                .map(|p| {
+                    let source = p.into_path().map_err(|_| "io_error".to_owned())?;
+                    let metadata = std::fs::metadata(&source).map_err(|_| "io_error".to_owned())?;
+                    if !metadata.is_file() {
+                        return Err("io_error".to_owned());
+                    }
+                    let file_name = source
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .ok_or_else(|| "invalid_name".to_owned())?
+                        .to_owned();
+                    Ok(ChosenSource {
+                        source,
+                        file_name,
+                        size_bytes: metadata.len().to_string(),
+                    })
+                })
                 .collect()
         })
         .transpose()

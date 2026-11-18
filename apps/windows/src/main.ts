@@ -12,6 +12,20 @@ type Transfer = {
   peer_id: string;
   destination: string | null;
 };
+type BatchFile = {
+  file_name: string;
+  size_bytes: string;
+  transfer_id: string | null;
+  state: string;
+};
+type UploadBatch = {
+  batch_id: string;
+  peer_id: string;
+  state: string;
+  files: BatchFile[];
+};
+type Source = { source: string; file_name: string; size_bytes: string };
+type BatchStatus = { batch_id: string; state: string };
 type Snapshot = {
   session: null | {
     session_id: string;
@@ -22,6 +36,7 @@ type Snapshot = {
   receive_enabled: boolean;
   peers: Peer[];
   transfers: Transfer[];
+  upload_batch: UploadBatch | null;
 };
 type Descriptor = {
   cert_sha256: string;
@@ -47,7 +62,8 @@ const invoke = <T>(
   return window.__TAURI__.core.invoke<T>(command, args);
 };
 const messages: Record<string, string> = {
-  invalid_request: "Comprueba que la IPv4 pertenezca a este PC y esté conectada a tu red.",
+  invalid_request:
+    "Comprueba que la IPv4 pertenezca a este PC y esté conectada a tu red.",
   busy: "Termina o cancela la transferencia actual antes de iniciar otra.",
   io_error:
     "No se pudo acceder al archivo o abrir la conexión. Comprueba la carpeta, los permisos y que la IPv4 pertenezca a este PC.",
@@ -83,45 +99,80 @@ let busy = false;
 type SendBatch = {
   sessionId: string;
   peerId: string;
-  sources: string[];
+  sources: (Source & BatchFile)[];
+  state: string;
   index: number;
   transferId: string | null;
 };
 let batch: SendBatch | null = null;
+let shownSendBatch: SendBatch | null = null;
+let shownUploadBatch: UploadBatch | null = null;
+let listSessionId: string | null = null;
+let batchListKey = "";
+let batchRows: { row: HTMLElement; name: HTMLElement; detail: HTMLElement }[] =
+  [];
 let offering = false;
 let offerRevision = 0;
 function discardBatch(message?: string): void {
+  if (batch) {
+    batch.state = batch.sources.every((f) => f.state === "completed")
+      ? "completed"
+      : batch.sources.some((f) => f.state === "failed")
+        ? "failed"
+        : "cancelled";
+    for (const file of batch.sources)
+      if (file.state === "pending") file.state = "unsent";
+  }
   batch = null;
   if (message) notice(message);
   updateControls();
 }
 async function cancelBatch(): Promise<void> {
-  const id = batch?.transferId;
+  const current = batch;
+  const id = current?.transferId;
+  if (current && id) current.sources[current.index].state = "cancelled";
   discardBatch("Lote cancelado. Los archivos pendientes no se enviarán.");
   // An in-flight offer is cancelled by sendNext when its IPC reply arrives.
   if (id) {
     try {
       await invoke("cancel_transfer", { transferId: id });
     } catch (error) {
-      notice(messages[String(error)] ?? "No se pudo cancelar el archivo. Revisa su estado.", true);
+      notice(
+        messages[String(error)] ??
+          "No se pudo cancelar el archivo. Revisa su estado.",
+        true,
+      );
     }
   }
   await refresh();
 }
 async function sendNext(current: SendBatch): Promise<void> {
+  if (shownUploadBatch && terminal(shownUploadBatch.state))
+    shownUploadBatch = null;
   offering = true;
   updateControls();
   try {
     const transfer = await invoke<Transfer>("offer_download", {
       peerId: current.peerId,
-      source: current.sources[current.index],
+      source: current.sources[current.index].source,
       sessionId: current.sessionId,
+    });
+    Object.assign(current.sources[current.index], {
+      file_name: transfer.file_name,
+      size_bytes: transfer.size_bytes,
+      transfer_id: transfer.transfer_id,
+      state: transfer.state,
     });
     if (batch !== current) {
       // Cancellation/revocation/close may happen while IPC is creating this offer.
       try {
-        await invoke("cancel_transfer", { transferId: transfer.transfer_id });
-      } catch { /* Already terminal or session closed. */ }
+        const result = await invoke<Transfer>("cancel_transfer", {
+          transferId: transfer.transfer_id,
+        });
+        if (result) current.sources[current.index].state = result.state;
+      } catch {
+        /* Already terminal or session closed. */
+      }
       return;
     }
     offerRevision++;
@@ -129,8 +180,12 @@ async function sendNext(current: SendBatch): Promise<void> {
     notice("Oferta enviada. Confirma cada archivo en el móvil.");
   } catch (error) {
     if (batch === current) {
+      current.sources[current.index].state = "failed";
       discardBatch();
-      notice(`${messages[String(error)] ?? "No se pudo ofrecer el archivo."} Los archivos pendientes no se enviarán.`, true);
+      notice(
+        `${messages[String(error)] ?? "No se pudo ofrecer el archivo."} Los archivos pendientes no se enviarán.`,
+        true,
+      );
     }
   } finally {
     offering = false;
@@ -145,25 +200,48 @@ function advanceBatch(snapshot: Snapshot): void {
     snapshot.session?.session_id !== current.sessionId ||
     !snapshot.peers.some((peer) => peer.id === current.peerId)
   ) {
-    discardBatch("El lote se ha detenido porque la sesión o el dispositivo ya no están disponibles.");
+    discardBatch(
+      "El lote se ha detenido porque la sesión o el dispositivo ya no están disponibles.",
+    );
     return;
   }
   if (current.transferId) {
-    const transfer = snapshot.transfers.find((t) => t.transfer_id === current.transferId);
-    if (!transfer || transfer.state === "failed" || transfer.state === "cancelled") {
-      discardBatch("El lote se ha detenido. Los archivos pendientes no se enviarán.");
+    const transfer = snapshot.transfers.find(
+      (t) => t.transfer_id === current.transferId,
+    );
+    if (transfer)
+      Object.assign(current.sources[current.index], {
+        file_name: transfer.file_name,
+        size_bytes: transfer.size_bytes,
+        state: transfer.state,
+      });
+    if (
+      !transfer ||
+      transfer.state === "failed" ||
+      transfer.state === "cancelled"
+    ) {
+      discardBatch(
+        "El lote se ha detenido. Los archivos pendientes no se enviarán.",
+      );
       return;
     }
     if (transfer.state !== "completed") return;
     current.index++;
     current.transferId = null;
     if (current.index === current.sources.length) {
-      discardBatch(`Lote completado: ${current.sources.length} archivos enviados y verificados.`);
+      discardBatch(
+        `Lote completado: ${current.sources.length} archivos enviados y verificados.`,
+      );
       return;
     }
   }
   // Respect every other v1 transfer, including an incoming request during a gap.
-  if (!offering && !busy && !snapshot.transfers.some((t) => !terminal(t.state)))
+  if (
+    !offering &&
+    !busy &&
+    !incomingReserved() &&
+    !snapshot.transfers.some((t) => !terminal(t.state))
+  )
     void sendNext(current);
 }
 const samples = new Map<
@@ -313,12 +391,14 @@ function updateControls(): void {
   $<HTMLButtonElement>("receive").disabled = !active || busy;
   $<HTMLButtonElement>("choose-folder").disabled = !active || busy;
   $<HTMLButtonElement>("send-file").disabled =
-    !active || !selectedPeer || hasPending || busy || Boolean(batch) || offering;
-  $("batch-panel").classList.toggle("hidden", !batch);
-  $<HTMLButtonElement>("cancel-batch").disabled = !batch;
-  $("batch-status").textContent = batch
-    ? `Archivo ${batch.index + 1} de ${batch.sources.length} · ${batch.sources.length - batch.index - 1} pendientes · ${peerName(batch.peerId)}`
-    : "";
+    !active ||
+    !selectedPeer ||
+    hasPending ||
+    incomingReserved() ||
+    busy ||
+    Boolean(batch) ||
+    offering;
+  renderBatch();
   $("receive").setAttribute(
     "aria-pressed",
     String(latest?.receive_enabled ?? false),
@@ -327,7 +407,7 @@ function updateControls(): void {
     ? "Dejar de recibir"
     : "Recibir";
   $("receive-setting").textContent = latest?.receive_enabled
-    ? "Disponible para recibir solicitudes. Cada archivo requiere autorización."
+    ? "Disponible para recibir solicitudes. Autoriza cada archivo o lote."
     : "La recepción está desactivada.";
   $("action-hint").textContent = !active
     ? "Inicia una sesión para conectar el móvil."
@@ -335,24 +415,150 @@ function updateControls(): void {
       ? "Muestra el QR para emparejar un móvil."
       : batch
         ? "Cada archivo necesita confirmación en el móvil. Puedes cancelar el lote completo."
-        : hasPending
-          ? "Termina o cancela la transferencia actual para enviar otra."
-          : latest.receive_enabled
-            ? "Disponible para recibir. Autoriza cada solicitud aquí."
-            : "Elige un dispositivo para enviar o activa Recibir.";
+        : incomingReserved()
+          ? latest?.upload_batch?.state === "awaiting_acceptance"
+            ? "Revisa los archivos del lote y acéptalo o recházalo aquí."
+            : "Recibiendo el lote autorizado. Puedes cancelar los archivos pendientes."
+          : hasPending
+            ? "Termina o cancela la transferencia actual para enviar otra."
+            : latest.receive_enabled
+              ? "Disponible para recibir. Autoriza cada archivo o lote aquí."
+              : "Elige un dispositivo para enviar o activa Recibir.";
   $("folder-label").textContent =
     selectedDestination ?? "Se elige al aceptar cada archivo";
   $("folder-hint").textContent = selectedDestination
     ? "Para las siguientes aceptaciones de esta sesión."
     : "Puedes elegir una carpeta para esta sesión.";
-  $("choose-folder").setAttribute("aria-label", selectedDestination
-    ? `Cambiar carpeta de recepción: ${selectedDestination}`
-    : "Elegir carpeta de recepción");
-  $("choose-folder").setAttribute("title", selectedDestination ?? "Elegir carpeta de recepción");
+  $("choose-folder").setAttribute(
+    "aria-label",
+    selectedDestination
+      ? `Cambiar carpeta de recepción: ${selectedDestination}`
+      : "Elegir carpeta de recepción",
+  );
+  $("choose-folder").setAttribute(
+    "title",
+    selectedDestination ?? "Elegir carpeta de recepción",
+  );
   for (const button of document.querySelectorAll<HTMLButtonElement>(
     "[data-transfer-action], [data-revoke]",
   ))
     button.disabled = busy;
+}
+function incomingReserved(): boolean {
+  return Boolean(latest?.upload_batch && !terminal(latest.upload_batch.state));
+}
+function batchFileLabel(
+  file: BatchFile,
+  incoming: boolean,
+  state: string,
+): string {
+  if (!file.transfer_id) {
+    if (file.state === "failed") return "No se pudo enviar";
+    if (terminal(state) || file.state === "unsent" || file.state === "not_sent")
+      return "Sin enviar";
+    return state === "awaiting_acceptance"
+      ? "Pendiente de aceptación"
+      : "Pendiente";
+  }
+  const labels: Record<string, string> = {
+    awaiting_acceptance: "Esperando aceptación en el móvil",
+    ready: "Preparado",
+    streaming: incoming ? "Recibiendo" : "Enviando",
+    awaiting_verification: "Verificando integridad",
+    completed: incoming ? "Recibido y verificado" : "Enviado y verificado",
+    failed: "Interrumpido",
+    cancelled: "Cancelado",
+  };
+  return labels[file.state] ?? "Pendiente";
+}
+function renderBatch(): void {
+  const incoming = shownUploadBatch;
+  const outgoing = shownSendBatch;
+  const files = incoming?.files ?? outgoing?.sources ?? [];
+  const state = incoming?.state ?? outgoing?.state ?? "";
+  const key = incoming
+    ? `in/${incoming.batch_id}`
+    : outgoing
+      ? `out/${outgoing.sessionId}/${outgoing.sources[0]?.source}`
+      : "";
+  const waiting = Boolean(incoming && state === "awaiting_acceptance");
+  $("batch-panel").classList.toggle("hidden", !files.length);
+  const accept = $<HTMLButtonElement>("accept-batch");
+  const cancel = $<HTMLButtonElement>("cancel-batch");
+  accept.hidden = !waiting;
+  accept.disabled = busy || !waiting || !incomingReserved();
+  cancel.hidden = !files.length || terminal(state);
+  cancel.disabled = busy || terminal(state) || (!incoming && !batch);
+  cancel.textContent = waiting ? "Rechazar lote" : "Cancelar lote";
+  const completed = files.filter((f) => f.state === "completed").length;
+  const label =
+    state === "awaiting_acceptance"
+      ? "Solicitud entrante"
+      : state === "completed"
+        ? "Lote completado"
+        : state === "failed"
+          ? "Lote interrumpido"
+          : state === "cancelled"
+            ? "Lote cancelado"
+            : "Lote en curso";
+  $("batch-status").textContent = incoming
+    ? `${label} · ${files.length} archivos · ${completed} verificados · ${peerName(incoming.peer_id)}`
+    : outgoing
+      ? terminal(state)
+        ? `${label} · ${completed} de ${files.length} verificados · ${peerName(outgoing.peerId)}`
+        : `Archivo ${outgoing.index + 1} de ${files.length} · ${files.length - outgoing.index - 1} pendientes · ${peerName(outgoing.peerId)}`
+      : "";
+  const list = $("batch-files");
+  if (batchListKey !== key || batchRows.length !== files.length) {
+    batchListKey = key;
+    batchRows = files.map(() => {
+      const row = node("li", "batch-file");
+      const name = node("span", "batch-file-name");
+      const detail = node("span", "batch-file-detail");
+      row.append(name, detail);
+      return { row, name, detail };
+    });
+    list.replaceChildren(...batchRows.map((f) => f.row));
+    list.scrollTop = 0;
+  }
+  files.forEach((file, i) => {
+    batchRows[i].name.textContent = file.file_name;
+    batchRows[i].detail.textContent =
+      `${formatBytes(BigInt(file.size_bytes))} · ${batchFileLabel(file, Boolean(incoming), state)}`;
+  });
+}
+async function acceptIncomingBatch(): Promise<void> {
+  const pending = latest?.upload_batch;
+  const sessionId = latest?.session?.session_id;
+  if (!pending || pending.state !== "awaiting_acceptance" || !sessionId) return;
+  await action(async () => {
+    const destination =
+      selectedDestination ??
+      (await invoke<string | null>("choose_destination"));
+    if (
+      !destination ||
+      latest?.session?.session_id !== sessionId ||
+      latest.upload_batch?.batch_id !== pending.batch_id ||
+      latest.upload_batch.state !== "awaiting_acceptance"
+    )
+      return;
+    await invoke<BatchStatus>("accept_upload_batch", {
+      batchId: pending.batch_id,
+      destination,
+    });
+    offerRevision++;
+    selectedDestination = destination;
+  });
+}
+async function cancelIncomingBatch(): Promise<void> {
+  const pending = latest?.upload_batch;
+  if (!pending || terminal(pending.state)) return;
+  await action(async () => {
+    await invoke<BatchStatus>("cancel_upload_batch", {
+      batchId: pending.batch_id,
+    });
+    offerRevision++;
+  });
 }
 async function acceptTransfer(t: Transfer): Promise<void> {
   await action(async () => {
@@ -424,11 +630,15 @@ function transferView(detailed: boolean): TransferView {
           ? (messages[t.error_code ?? ""] ??
             "La transferencia se interrumpió. Vuelve a enviarla.")
           : "";
-      const signature = `${t.transfer_id}/${t.state}/${Boolean(selectedDestination)}`;
+      const inBatch =
+        latest?.upload_batch?.files.some(
+          (f) => f.transfer_id === t.transfer_id,
+        ) ?? false;
+      const signature = `${t.transfer_id}/${t.state}/${Boolean(selectedDestination)}/${inBatch}`;
       if (signature !== actionSignature) {
         actionSignature = signature;
         actions.replaceChildren();
-        if (!terminal(t.state)) {
+        if (!terminal(t.state) && !inBatch) {
           if (t.direction === "upload" && t.state === "awaiting_acceptance") {
             const accept = node(
               "button",
@@ -595,7 +805,22 @@ async function refresh(): Promise<void> {
     const revision = offerRevision;
     const snapshot = await invoke<Snapshot>("snapshot");
     if (revision !== offerRevision) return; // An offer completed after this snapshot was requested.
+    const sessionId = snapshot.session?.session_id ?? null;
+    if (sessionId !== listSessionId) {
+      if (batch && batch.sessionId !== sessionId) discardBatch();
+      shownSendBatch = null;
+      shownUploadBatch = null;
+      listSessionId = sessionId;
+    }
     latest = snapshot;
+    if (snapshot.upload_batch) {
+      if (
+        !terminal(snapshot.upload_batch.state) ||
+        !shownSendBatch ||
+        shownUploadBatch?.batch_id === snapshot.upload_batch.batch_id
+      )
+        shownUploadBatch = snapshot.upload_batch;
+    }
     const active = latest.session !== null;
     $("session-badge").textContent = active
       ? "Sesión activa"
@@ -604,7 +829,7 @@ async function refresh(): Promise<void> {
     $("session-setup").classList.toggle("hidden", active);
     $("session-address").textContent = latest.session
       ? `${latest.session.host}:${latest.session.port}`
-      : "Sesión cerrada. Inicia una sesión desde Inicio.";
+      : "Sesión cerrada. Inicia una sesión desde la pantalla principal.";
     if (!active) {
       hideDescriptor();
       selectedDestination = null;
@@ -643,6 +868,18 @@ async function refresh(): Promise<void> {
       );
       delete recentContainer.dataset.transferId;
     }
+    if (shownSendBatch)
+      for (const file of shownSendBatch.sources) {
+        const transfer = latest.transfers.find(
+          (t) => t.transfer_id === file.transfer_id,
+        );
+        if (transfer)
+          Object.assign(file, {
+            file_name: transfer.file_name,
+            size_bytes: transfer.size_bytes,
+            state: transfer.state,
+          });
+      }
     advanceBatch(latest);
     updateControls();
   } finally {
@@ -686,19 +923,43 @@ $("send-file").onclick = () => {
   void action(async () => {
     const peerId = selectedPeer;
     const sessionId = latest?.session?.session_id;
-    if (!peerId || !sessionId || batch || offering) return;
-    const sources = await invoke<string[] | null>("choose_sources");
+    if (!peerId || !sessionId || batch || offering || incomingReserved())
+      return;
+    const sources = await invoke<Source[] | null>("choose_sources");
     if (!sources?.length) return;
     if (
       latest?.session?.session_id !== sessionId ||
-      !latest.peers.some((peer) => peer.id === peerId)
-    ) return;
-    batch = { peerId, sessionId, sources, index: 0, transferId: null };
-    notice(`Lote preparado: ${sources.length} archivos. Confirma cada archivo en el móvil.`);
+      !latest.peers.some((peer) => peer.id === peerId) ||
+      incomingReserved() ||
+      latest.transfers.some((t) => !terminal(t.state))
+    )
+      return;
+    batch = {
+      peerId,
+      sessionId,
+      sources: sources.map((f) => ({
+        ...f,
+        transfer_id: null,
+        state: "pending",
+      })),
+      index: 0,
+      transferId: null,
+      state: "accepted",
+    };
+    shownSendBatch = batch;
+    shownUploadBatch = null;
+    notice(
+      `Lote preparado: ${sources.length} archivos. Confirma cada archivo en el móvil.`,
+    );
   });
 };
+$("accept-batch").onclick = () => {
+  void acceptIncomingBatch();
+};
 $("cancel-batch").onclick = () => {
-  void cancelBatch();
+  if (shownUploadBatch && !terminal(shownUploadBatch.state))
+    void cancelIncomingBatch();
+  else void cancelBatch();
 };
 $("pair").onclick = () => {
   void action(async () => {

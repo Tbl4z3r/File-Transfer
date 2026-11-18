@@ -348,8 +348,26 @@ textarea {
   max-height: 180px;
   overflow-y: auto;
   overflow-wrap: anywhere;
-  padding-left: 20px;
+  list-style: none;
+  padding-left: 0;
   margin: 12px 0;
+}
+.batch-file {
+  padding: 7px 0;
+}
+.batch-file + .batch-file {
+  border-top: 1px solid var(--line);
+}
+.batch-file-name,
+.batch-file-detail {
+  display: block;
+}
+.batch-file-name {
+  font-weight: 600;
+}
+.batch-file-detail {
+  font-size: 12px;
+  color: var(--muted);
 }
 .batch-files:empty {
   display: none;
