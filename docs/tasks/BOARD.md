@@ -12,6 +12,7 @@ Estados: pendiente → lista → en curso → en revisión → cambios solicitad
 | ANDROID-RX | Corregir publicación Android, carpeta SAF y diagnósticos | Sol + Luna | integrada en prueba; repetir en móvil | Prueba Redmi Note 14 5G |
 | H2-QR | Conectar con QR sin copiar JSON para probar J4+ | Sol / Terra | integrada en prueba; lectura confirmada por el usuario | Descriptor v1 existente |
 | UI-PALETA | Esencial en Android y Enfoque en Windows con paleta azul | GPT-6.2 y dos implementadores Sol | en prueba; confirmar en dispositivos | Flujos de QR y transferencia |
+| PUERTO-LOTES | Puerto automático en Windows y selección múltiple en ambos clientes | GPT-6.2 y dos implementadores Sol | en prueba; confirmar en dispositivos | Sesión TLS y transferencias v1 |
 | H2–H5 | Descubrimiento, uso cotidiano, recuperación y distribución | por asignar | pendiente | H1 validado |
 
 La revisión del autor no equivale a aprobación. Las verificaciones en dispositivos físicos y mediciones de la LAN requieren acceso real al Windows y al J4+.
