@@ -117,18 +117,16 @@
           aria-labelledby="connection-title"
         >
           <h2 id="connection-title">Conexión del PC</h2>
-          <p>Introduce la IPv4 de este PC en la misma red que tu móvil.</p>
+          <p>Conecta el PC y el móvil a la misma red. La conexión se prepara automáticamente.</p>
           <form id="session-form">
-            <label
-              >IPv4 del PC<input
-                id="bind-ip"
-                placeholder="192.168.1.20"
-                required
-                inputmode="decimal"
-                autocomplete="off" /></label
-            ><button id="start-session" class="primary" type="submit">
+            <button id="start-session" class="primary" type="submit">
               Iniciar sesión
             </button>
+            <details id="manual-network">
+              <summary>Elegir otra conexión</summary>
+              <label>IPv4 de este PC (opcional)<input id="bind-ip" placeholder="Automática" inputmode="decimal" autocomplete="off" /></label>
+              <p class="hint">Si hay varias redes o una VPN, introduce la IPv4 de la red compartida con tu móvil y vuelve a iniciar.</p>
+            </details>
           </form>
           <p class="hint">
             Usa una red privada. Si el firewall lo solicita, permite la conexión

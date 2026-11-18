@@ -3,14 +3,14 @@
   font-synthesis: none;
   font-size: 14px;
   color-scheme: light dark;
-  --bg: #f4f7fe;
+  --bg: #f1f3f6;
   --surface: #fff;
-  --ink: #091540;
-  --muted: #3d518c;
-  --accent: #1b2cc1;
+  --ink: #253044;
+  --muted: #566274;
+  --accent: #526a8a;
   --on-accent: #fff;
-  --soft: #e8f2fe;
-  --line: #d7e0f3;
+  --soft: #e8edf3;
+  --line: #d9dfe7;
   --outline: #8596bd;
   --error: #a32632;
   --error-bg: #fff0f1;
@@ -22,6 +22,7 @@
 }
 body {
   margin: 0;
+  background: linear-gradient(135deg, var(--bg), var(--soft));
 }
 button,
 input,
@@ -597,14 +598,14 @@ textarea {
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #091540;
-    --surface: #162653;
+    --bg: #1b222d;
+    --surface: #242e3c;
     --ink: #f4f7fe;
-    --muted: #abd2fa;
-    --accent: #7692ff;
+    --muted: #b0bdce;
+    --accent: #9bafcb;
     --on-accent: #091540;
-    --soft: #203867;
-    --line: #354a78;
+    --soft: #2c394b;
+    --line: #3d4a5d;
     --outline: #7288b4;
     --error: #ffb5bc;
     --error-bg: #482438;

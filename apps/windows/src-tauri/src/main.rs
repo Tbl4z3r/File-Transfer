@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod network;
 use file_transfer_core::{
     BatchStatus, Engine, Snapshot,
     model::{Descriptor, Transfer},
@@ -13,13 +14,36 @@ async fn start_session(
     core: Core<'_>,
     bind_ipv4: String,
 ) -> Result<file_transfer_core::SessionInfo, String> {
-    let bind = bind_ipv4
-        .parse::<Ipv4Addr>()
-        .map_err(|_| "invalid_request".to_owned())?;
-    core.inner()
-        .start_session_auto(bind)
-        .await
-        .map_err(|e| e.code.to_owned())
+    let manual = bind_ipv4.trim();
+    let candidates = if manual.is_empty() {
+        tauri::async_runtime::spawn_blocking(network::candidates)
+            .await
+            .map_err(|_| "network_unavailable".to_owned())?
+    } else {
+        let ip = manual
+            .parse::<Ipv4Addr>()
+            .map_err(|_| "invalid_request".to_owned())?;
+        if !network::usable(ip) {
+            return Err("invalid_request".to_owned());
+        }
+        vec![ip]
+    };
+    if candidates.is_empty() {
+        return Err("network_unavailable".to_owned());
+    }
+    let mut last_error = "network_unavailable".to_owned();
+    for bind in candidates {
+        match core.inner().start_session_auto(bind).await {
+            Ok(info) => return Ok(info),
+            Err(error) => {
+                if error.code == "busy" {
+                    return Err(error.code.to_owned());
+                }
+                last_error = error.code.to_owned();
+            }
+        }
+    }
+    Err(last_error)
 }
 #[tauri::command]
 fn stop_session(core: Core<'_>) {

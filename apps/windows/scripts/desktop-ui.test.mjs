@@ -54,6 +54,42 @@ test("session form starts a real session command and closing clears the session 
   );
 });
 
+test("one click with no IP opens the QR and a pairing failure keeps the listener", async () => {
+  for (const failQr of [false, true]) {
+    const h = await ui(undefined, { session: null, peers: [] });
+    if (failQr) h.failOpen();
+    h.onInvoke(async (command) => {
+      if (command === "start_session") h.snapshot.session = { session_id: "automatic", host: "192.168.1.8", port: 51337 };
+    });
+    h.element("session-form").onsubmit({ preventDefault() {} });
+    await h.settle();
+    assert.equal(commands(h, "start_session")[0].args.bindIpv4, "");
+    assert.equal(commands(h, "open_pairing_window").length, 1);
+    assert.equal(commands(h, "stop_session").length, 0);
+    assert.equal(h.snapshot.session.session_id, "automatic");
+    assert.equal(h.element("session-address").textContent, "192.168.1.8:51337");
+    assert.equal(h.element("pair-panel").open, !failQr);
+  }
+});
+
+test("automatic QR survives a snapshot that began before startup", async () => {
+  const h = await ui(undefined, { session: null, peers: [] });
+  let release;
+  h.onSnapshot((value) => new Promise((resolve) => { release = () => resolve(value); }));
+  await h.tick();
+  h.onInvoke(async (command) => {
+    if (command === "start_session") h.snapshot.session = { session_id: "new", host: "192.168.1.8", port: 51337 };
+  });
+  h.element("session-form").onsubmit({ preventDefault() {} });
+  await h.settle();
+  h.onSnapshot(null);
+  release();
+  await h.settle();
+  await h.tick();
+  assert.equal(h.element("pair-panel").open, true);
+  assert.equal(commands(h, "open_pairing_window").length, 1);
+});
+
 test("send picks multiple real files and cancelled picker sends nothing", async () => {
   const h = await ui(undefined, { peers });
   let sources = null;

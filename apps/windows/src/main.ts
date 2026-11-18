@@ -63,6 +63,8 @@ const invoke = <T>(
   return window.__TAURI__.core.invoke<T>(command, args);
 };
 const messages: Record<string, string> = {
+  network_unavailable:
+    "No se encontró una red activa. Conecta el PC a Wi-Fi o Ethernet y vuelve a iniciar. También puedes elegir otra conexión e introducir su IPv4.",
   invalid_request:
     "Comprueba que la IPv4 pertenezca a este PC y esté conectada a tu red.",
   busy: "Termina o cancela la transferencia actual antes de iniciar otra.",
@@ -95,7 +97,7 @@ let latest: Snapshot | null = null;
 let peerSignature = "";
 let descriptorUntil = 0;
 let pairingGeneration = 0;
-let refreshing = false;
+let refreshPending: Promise<void> | null = null;
 let busy = false;
 type SendBatch = {
   sessionId: string;
@@ -830,123 +832,124 @@ function updateSpeeds(transfers: Transfer[]): void {
     speeds.set(t.transfer_id, speed);
   }
 }
-async function refresh(): Promise<void> {
-  if (refreshing) return;
-  refreshing = true;
-  try {
-    const revision = offerRevision;
-    const snapshot = await invoke<Snapshot>("snapshot");
-    if (revision !== offerRevision) return; // An offer completed after this snapshot was requested.
-    const sessionId = snapshot.session?.session_id ?? null;
-    // Only compare consecutive snapshots belonging to the same active session.
-    const disappeared =
-      sessionId && latest?.session?.session_id === sessionId
-        ? latest.peers.filter(
-            (peer) => !snapshot.peers.some((next) => next.id === peer.id),
-          )
-        : [];
-    if (sessionId !== listSessionId) {
-      if (batch && batch.sessionId !== sessionId) discardBatch();
-      shownSendBatch = null;
-      shownUploadBatch = null;
-      shownDownloadBatch = null;
-      selectedDestination = null;
-      peerNames.clear();
-      samples.clear();
-      speeds.clear();
-      hideDescriptor();
-      listSessionId = sessionId;
-    }
-    latest = snapshot;
-    for (const peer of snapshot.peers) peerNames.set(peer.id, peer.name);
-    if (sessionId && snapshot.upload_batch) {
-      if (
-        !terminal(snapshot.upload_batch.state) ||
-        (!shownSendBatch && !shownDownloadBatch) ||
-        shownUploadBatch?.batch_id === snapshot.upload_batch.batch_id
-      ) {
-        shownUploadBatch = snapshot.upload_batch;
-        if (!terminal(snapshot.upload_batch.state)) shownDownloadBatch = null;
-      }
-    }
-    if (sessionId && snapshot.download_batch) {
-      if (
-        !terminal(snapshot.download_batch.state) ||
-        (!shownSendBatch && !shownUploadBatch) ||
-        shownDownloadBatch?.batch_id === snapshot.download_batch.batch_id
-      ) {
-        shownDownloadBatch = snapshot.download_batch;
-        if (!terminal(snapshot.download_batch.state)) shownUploadBatch = null;
-      }
-    }
-    const active = latest.session !== null;
-    $("session-badge").textContent = active
-      ? "Sesión activa"
-      : "Sesión cerrada";
-    $("session-badge").classList.toggle("active", active);
-    $("session-setup").classList.toggle("hidden", active);
-    $("session-address").textContent = latest.session
-      ? `${latest.session.host}:${latest.session.port}`
-      : "Sesión cerrada. Inicia una sesión desde la pantalla principal.";
-    if (!active) {
-      hideDescriptor();
-      selectedDestination = null;
-    }
-    if (!latest.peers.some((peer) => peer.id === selectedPeer))
-      selectedPeer = latest.peers[0]?.id ?? "";
-    renderPeers();
-    updateSpeeds(latest.transfers);
-    const ordered = [...latest.transfers].reverse();
-    const current = ordered.find((t) => !terminal(t.state)) ?? ordered[0];
-    renderTransfers($("current-transfer"), current ? [current] : []);
-    renderTransfers($("transfers"), ordered, true);
-    const recent = ordered.find((t) => terminal(t.state));
-    const recentContainer = $("recent-transfer");
-    if (recent) {
-      if (
-        recentContainer.dataset.transferId !== recent.transfer_id ||
-        recentContainer.dataset.state !== recent.state
-      ) {
-        const row = node("div", "row");
-        const tile = node("span", "icon-tile");
-        tile.append(icon(recent.state === "completed" ? "check" : "file"));
-        const text = node("div", "grow");
-        text.append(
-          node("p", "transfer-name", recent.file_name),
-          node("p", "transfer-detail", stateLabel(recent)),
-        );
-        row.append(tile, text);
-        recentContainer.replaceChildren(row);
-        recentContainer.dataset.transferId = recent.transfer_id;
-        recentContainer.dataset.state = recent.state;
-      }
-    } else {
-      recentContainer.replaceChildren(
-        node("p", "", "Todavía no hay transferencias finalizadas."),
-      );
-      delete recentContainer.dataset.transferId;
-    }
-    if (shownSendBatch)
-      for (const file of shownSendBatch.sources) {
-        const transfer = latest.transfers.find(
-          (t) => t.transfer_id === file.transfer_id,
-        );
-        if (transfer)
-          Object.assign(file, {
-            file_name: transfer.file_name,
-            size_bytes: transfer.size_bytes,
-            state: transfer.state,
-          });
-      }
-    advanceBatch(latest);
-    if (disappeared.length)
-      notice(
-        `${disappeared.map((peer) => peer.name).join(", ")} ${disappeared.length === 1 ? "se ha desconectado" : "se han desconectado"}. Para volver a conectar, muestra un nuevo QR y escanéalo en el móvil.`,
-      );
-    updateControls();
-  } finally {
-    refreshing = false;
+function refresh(): Promise<void> {
+  if (refreshPending) return refreshPending;
+  refreshPending = refreshNow().finally(() => {
+    refreshPending = null;
+  });
+  return refreshPending;
+}
+async function refreshNow(): Promise<void> {
+  const revision = offerRevision;
+  const snapshot = await invoke<Snapshot>("snapshot");
+  if (revision !== offerRevision) return; // An offer completed after this snapshot was requested.
+  const sessionId = snapshot.session?.session_id ?? null;
+  // Only compare consecutive snapshots belonging to the same active session.
+  const disappeared =
+    sessionId && latest?.session?.session_id === sessionId
+      ? latest.peers.filter(
+          (peer) => !snapshot.peers.some((next) => next.id === peer.id),
+        )
+      : [];
+  if (sessionId !== listSessionId) {
+    if (batch && batch.sessionId !== sessionId) discardBatch();
+    shownSendBatch = null;
+    shownUploadBatch = null;
+    shownDownloadBatch = null;
+    selectedDestination = null;
+    peerNames.clear();
+    samples.clear();
+    speeds.clear();
+    hideDescriptor();
+    listSessionId = sessionId;
   }
+  latest = snapshot;
+  for (const peer of snapshot.peers) peerNames.set(peer.id, peer.name);
+  if (sessionId && snapshot.upload_batch) {
+    if (
+      !terminal(snapshot.upload_batch.state) ||
+      (!shownSendBatch && !shownDownloadBatch) ||
+      shownUploadBatch?.batch_id === snapshot.upload_batch.batch_id
+    ) {
+      shownUploadBatch = snapshot.upload_batch;
+      if (!terminal(snapshot.upload_batch.state)) shownDownloadBatch = null;
+    }
+  }
+  if (sessionId && snapshot.download_batch) {
+    if (
+      !terminal(snapshot.download_batch.state) ||
+      (!shownSendBatch && !shownUploadBatch) ||
+      shownDownloadBatch?.batch_id === snapshot.download_batch.batch_id
+    ) {
+      shownDownloadBatch = snapshot.download_batch;
+      if (!terminal(snapshot.download_batch.state)) shownUploadBatch = null;
+    }
+  }
+  const active = latest.session !== null;
+  $("session-badge").textContent = active
+    ? "Sesión activa"
+    : "Sesión cerrada";
+  $("session-badge").classList.toggle("active", active);
+  $("session-setup").classList.toggle("hidden", active);
+  $("session-address").textContent = latest.session
+    ? `${latest.session.host}:${latest.session.port}`
+    : "Sesión cerrada. Inicia una sesión desde la pantalla principal.";
+  if (!active) {
+    hideDescriptor();
+    selectedDestination = null;
+  }
+  if (!latest.peers.some((peer) => peer.id === selectedPeer))
+    selectedPeer = latest.peers[0]?.id ?? "";
+  renderPeers();
+  updateSpeeds(latest.transfers);
+  const ordered = [...latest.transfers].reverse();
+  const current = ordered.find((t) => !terminal(t.state)) ?? ordered[0];
+  renderTransfers($("current-transfer"), current ? [current] : []);
+  renderTransfers($("transfers"), ordered, true);
+  const recent = ordered.find((t) => terminal(t.state));
+  const recentContainer = $("recent-transfer");
+  if (recent) {
+    if (
+      recentContainer.dataset.transferId !== recent.transfer_id ||
+      recentContainer.dataset.state !== recent.state
+    ) {
+      const row = node("div", "row");
+      const tile = node("span", "icon-tile");
+      tile.append(icon(recent.state === "completed" ? "check" : "file"));
+      const text = node("div", "grow");
+      text.append(
+        node("p", "transfer-name", recent.file_name),
+        node("p", "transfer-detail", stateLabel(recent)),
+      );
+      row.append(tile, text);
+      recentContainer.replaceChildren(row);
+      recentContainer.dataset.transferId = recent.transfer_id;
+      recentContainer.dataset.state = recent.state;
+    }
+  } else {
+    recentContainer.replaceChildren(
+      node("p", "", "Todavía no hay transferencias finalizadas."),
+    );
+    delete recentContainer.dataset.transferId;
+  }
+  if (shownSendBatch)
+    for (const file of shownSendBatch.sources) {
+      const transfer = latest.transfers.find(
+        (t) => t.transfer_id === file.transfer_id,
+      );
+      if (transfer)
+        Object.assign(file, {
+          file_name: transfer.file_name,
+          size_bytes: transfer.size_bytes,
+          state: transfer.state,
+        });
+    }
+  advanceBatch(latest);
+  if (disappeared.length)
+    notice(
+      `${disappeared.map((peer) => peer.name).join(", ")} ${disappeared.length === 1 ? "se ha desconectado" : "se han desconectado"}. Para volver a conectar, muestra un nuevo QR y escanéalo en el móvil.`,
+    );
+  updateControls();
 }
 $("session-form").onsubmit = (event) => {
   event.preventDefault();
@@ -955,7 +958,10 @@ $("session-form").onsubmit = (event) => {
       bindIpv4: $<HTMLInputElement>("bind-ip").value.trim(),
     });
     selectedDestination = null;
-    notice("Sesión abierta. Muestra el QR para emparejar tu móvil.");
+    if (refreshPending) await refreshPending;
+    await refresh();
+    await showPairing();
+    notice("Sesión abierta. Escanea el QR con tu móvil.");
   });
 };
 $("stop-session").onclick = () => {
@@ -1049,31 +1055,32 @@ $("cancel-batch").onclick = () => {
     void cancelOutgoingBatch();
   else void cancelBatch();
 };
+async function showPairing() {
+  hideDescriptor(); // Never leave credentials from an earlier window after an IPC or encoder failure.
+  const generation = pairingGeneration;
+  const until = performance.now() + 120000; // Include IPC time conservatively in the server window.
+  const descriptor = await invoke<Descriptor>("open_pairing_window");
+  if (generation !== pairingGeneration || performance.now() >= until) return;
+  const payload = JSON.stringify(descriptor);
+  descriptorUntil = until;
+  $<HTMLTextAreaElement>("descriptor").value = payload;
+  $("fingerprint").textContent =
+    `Huella: ${descriptor.cert_sha256.match(/.{1,8}/g)?.join(" ")}`;
+  try {
+    const qr = encodePairingQr(payload);
+    $<HTMLImageElement>("pair-qr").src = qr.dataUrl;
+    $("pair-qr").classList.remove("hidden");
+  } catch {
+    $("qr-error").classList.remove("hidden");
+    $<HTMLDetailsElement>("manual-pair").open = true;
+  }
+  $("pair-seconds").textContent = String(
+    Math.max(0, Math.ceil((until - performance.now()) / 1000)),
+  );
+  showPanel("pair-panel");
+}
 $("pair").onclick = () => {
-  void action(async () => {
-    hideDescriptor(); // Never leave credentials from an earlier window after an IPC or encoder failure.
-    const generation = pairingGeneration;
-    const until = performance.now() + 120000; // Include IPC time conservatively in the server window.
-    const descriptor = await invoke<Descriptor>("open_pairing_window");
-    if (generation !== pairingGeneration || performance.now() >= until) return;
-    const payload = JSON.stringify(descriptor);
-    descriptorUntil = until;
-    $<HTMLTextAreaElement>("descriptor").value = payload;
-    $("fingerprint").textContent =
-      `Huella: ${descriptor.cert_sha256.match(/.{1,8}/g)?.join(" ")}`;
-    try {
-      const qr = encodePairingQr(payload);
-      $<HTMLImageElement>("pair-qr").src = qr.dataUrl;
-      $("pair-qr").classList.remove("hidden");
-    } catch {
-      $("qr-error").classList.remove("hidden");
-      $<HTMLDetailsElement>("manual-pair").open = true;
-    }
-    $("pair-seconds").textContent = String(
-      Math.max(0, Math.ceil((until - performance.now()) / 1000)),
-    );
-    showPanel("pair-panel");
-  });
+  void action(showPairing);
 };
 $("hide-pair").onclick = hideDescriptor;
 $<HTMLDialogElement>("pair-panel").addEventListener("cancel", (event) => {
