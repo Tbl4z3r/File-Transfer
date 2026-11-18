@@ -10,41 +10,80 @@ import java.io.File
 import java.io.IOException
 
 class ReceiveStorageException(val code: String, message: String, cause: Throwable? = null) : IOException(message, cause)
-data class ReceivedDocument(val uri: Uri, val name: String)
+data class ReceivedDocument(val uri: Uri, val name: String, val location: ReceiveLocation)
+data class ReceiveLocation(val tree: Uri?, val label: String)
+data class ReceiveFolderEntry(val uri: Uri, val name: String, val isDirectory: Boolean)
 
 /** App-private staging keeps unverified bytes out of the selected provider. */
 class ReceiveStorage(private val context: Context) {
     private val resolver = context.contentResolver
     private val prefs = context.getSharedPreferences("receive_destination", Context.MODE_PRIVATE)
     fun selectedTree(): Uri? = prefs.getString("tree", null)?.let(Uri::parse)
-    fun usePrivateInbox() {
-        val previous = selectedTree()
-        check(prefs.edit().remove("tree").remove("label").commit())
-        previous?.let { release(it) }
+    // This app persists grants only for receive trees. Keep the current setting and any
+    // locations still referenced by this activity's history, including across rotation.
+    fun pruneHistoryGrants(historyTrees: Set<Uri>) {
+        val selected = selectedTree()
+        resolver.persistedUriPermissions.filter { DocumentsContract.isTreeUri(it.uri) && it.uri != selected }.forEach { permission ->
+            var flags = 0
+            if (permission.isReadPermission && permission.uri !in historyTrees) flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+            if (permission.isWritePermission) flags = flags or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            if (flags != 0) runCatching { resolver.releasePersistableUriPermission(permission.uri, flags) }
+        }
     }
-    private fun release(uri: Uri) { runCatching { resolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) } }
 
-    fun selectTree(uri: Uri, flags: Int): String {
+    private fun setDestination(uri: Uri?, label: String?, historyTrees: Set<Uri>) {
+        check(prefs.edit().putString("tree", uri?.toString()).putString("label", label).commit())
+        pruneHistoryGrants(historyTrees)
+    }
+
+    fun usePrivateInbox(historyTrees: Set<Uri>) = setDestination(null, null, historyTrees)
+
+    fun selectTree(uri: Uri, flags: Int, historyTrees: Set<Uri>): String {
         val granted = flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         if (granted and Intent.FLAG_GRANT_WRITE_URI_PERMISSION == 0 || granted and Intent.FLAG_GRANT_READ_URI_PERMISSION == 0) {
             throw ReceiveStorageException("destination_permission", "No se concedió acceso de lectura y escritura. Elige otra carpeta.")
         }
-        val previous = selectedTree()
         resolver.takePersistableUriPermission(uri, granted)
         try {
             val label = validateTree(uri)
-            check(prefs.edit().putString("tree", uri.toString()).putString("label", label).commit())
-            if (previous != uri) previous?.let { release(it) }
+            setDestination(uri, label, historyTrees)
             return label
         } catch (error: Exception) {
-            if (previous != uri) release(uri)
+            pruneHistoryGrants(historyTrees)
             throw error
         }
     }
 
     fun destinationLabel(): String = if (selectedTree() != null) prefs.getString("label", "Carpeta seleccionada")!! else "Bandeja privada de la aplicación"
     fun validateDestination() { selectedTree()?.let { validateTree(it) } }
-    private fun directory(tree: Uri): Uri = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+    fun directory(tree: Uri): Uri = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+
+    private fun privateInbox() = File(context.filesDir, "inbox")
+
+    private fun privateUri(file: File): Uri = FileProvider.getUriForFile(context, "${context.packageName}.inbox", file)
+
+    fun listFolder(location: ReceiveLocation, folder: Uri?): List<ReceiveFolderEntry> {
+        val tree = location.tree
+        val entries = if (tree == null) {
+            privateInbox().listFiles().orEmpty().filter(File::isFile)
+                .map { ReceiveFolderEntry(privateUri(it), it.name, false) }
+        } else {
+            val parent = folder ?: directory(tree)
+            val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(parent))
+            val columns = arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE)
+            resolver.query(children, columns, null, null, null)?.use { cursor ->
+                buildList<ReceiveFolderEntry> {
+                    while (cursor.moveToNext()) {
+                        val id = cursor.getString(0)
+                        add(ReceiveFolderEntry(DocumentsContract.buildDocumentUriUsingTree(tree, id),
+                            cursor.getString(1) ?: "Archivo", cursor.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR))
+                    }
+                }
+            } ?: throw IOException("No se pudo leer la carpeta")
+        }
+        return entries.sortedWith(compareBy<ReceiveFolderEntry> { !it.isDirectory }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+    }
 
     private fun validateTree(tree: Uri): String {
         try {
@@ -68,11 +107,11 @@ class ReceiveStorage(private val context: Context) {
         require(Validation.name(requestedName))
         val tree = selectedTree()
         if (tree == null) {
-            val inbox = File(context.filesDir, "inbox").apply { check(isDirectory || mkdirs()) }
+            val inbox = privateInbox().apply { check(isDirectory || mkdirs()) }
             val target = PrivateInboxPublisher.publish(source, inbox, requestedName, size, hash, cancelled)
-            return ReceivedDocument(FileProvider.getUriForFile(context, "${context.packageName}.inbox", target), target.name)
+            return ReceivedDocument(privateUri(target), target.name, ReceiveLocation(null, "Bandeja privada de la aplicación"))
         }
-        validateTree(tree)
+        val folderLabel = validateTree(tree)
         val names = HashSet<String>()
         val existingIds = HashSet<String>()
         val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
@@ -105,7 +144,7 @@ class ReceiveStorage(private val context: Context) {
                 ?: throw ReceiveStorageException("destination_write", "No se pudo abrir el archivo nuevo para guardar.")
             output.use { VerifiedCopy.copy(source, it, size, hash, cancelled) }
             val actualName = resolver.query(created, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { if (it.moveToFirst()) it.getString(0) else null } ?: candidate
-            return ReceivedDocument(created, actualName)
+            return ReceivedDocument(created, actualName, ReceiveLocation(tree, folderLabel))
         } catch (error: Exception) {
             // Delete only the document created by this operation. Providers may refuse cleanup; expose that case.
             val cleaned = runCatching { DocumentsContract.deleteDocument(resolver, created) }.getOrDefault(false)
