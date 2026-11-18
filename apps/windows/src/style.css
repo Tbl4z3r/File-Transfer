@@ -80,10 +80,11 @@ button.primary:hover:enabled {
   overflow: hidden;
 }
 .app {
-  min-height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
   display: grid;
   grid-template-columns: 67px minmax(0, 1fr);
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto minmax(0, 1fr) auto;
 }
 .topbar {
   grid-column: 1/-1;
@@ -151,7 +152,6 @@ button.primary:hover:enabled {
   flex-direction: column;
   gap: 9px;
   padding: 13px 9px;
-  border-right: 1px solid var(--line);
 }
 .icon-button {
   position: relative;
@@ -196,25 +196,30 @@ button.primary:hover:enabled {
 .main-content {
   width: 100%;
   max-width: 1220px;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
   padding: 24px 28px;
   display: grid;
   align-content: start;
   grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
-  grid-template-areas: "notice notice" "setup setup" "transfer devices" "transfer actions" "folder recent";
   gap: 20px 24px;
   outline: none;
 }
-.main-content:has(.notice.hidden) {
-  grid-template-areas: "setup setup" "transfer devices" "transfer actions" "folder recent";
+.main-content > .notice,
+.connection {
+  grid-column: 1/-1;
 }
-.main-content:has(.connection.hidden) {
-  grid-template-areas: "notice notice" "transfer devices" "transfer actions" "folder recent";
+.current,
+.side-content {
+  min-width: 0;
 }
-.main-content:has(.notice.hidden):has(.connection.hidden) {
-  grid-template-areas: "transfer devices" "transfer actions" "folder recent";
+.side-content {
+  display: grid;
+  align-content: start;
+  gap: 20px;
 }
 .notice {
-  grid-area: notice;
   padding: 12px 15px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -250,9 +255,6 @@ p {
   border-radius: 14px;
   padding: 20px;
 }
-.connection {
-  grid-area: setup;
-}
 .connection > p {
   margin-bottom: 12px;
 }
@@ -287,14 +289,7 @@ textarea {
 #port {
   width: 100px;
 }
-.current {
-  grid-area: transfer;
-}
-.devices {
-  grid-area: devices;
-}
 .actions {
-  grid-area: actions;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 9px;
@@ -309,22 +304,55 @@ textarea {
   color: var(--muted);
 }
 .folder {
-  grid-area: folder;
-  align-self: end;
+  grid-column: 1/-1;
+  min-width: 0;
+  padding: 10px 20px 13px;
+  background: var(--bg);
 }
-.folder p {
-  color: var(--ink);
+.folder-button {
+  max-width: 100%;
+  min-width: 0;
+  justify-content: start;
+  text-align: left;
+  padding: 5px;
+  border-color: transparent;
+  background: transparent;
+  font-weight: 400;
+}
+.folder-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+#folder-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
 }
 .folder .hint {
-  color: var(--muted);
   font-size: 11px;
-  margin-top: 3px;
+  font-weight: 400;
 }
 .quiet-label {
   font-size: 12px;
   font-weight: 400;
   color: var(--muted);
-  margin: 0 0 3px;
+  margin: 0;
+}
+.batch-panel {
+  margin-top: 12px;
+}
+.batch-files {
+  max-height: 180px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  padding-left: 20px;
+  margin: 12px 0;
+}
+.batch-files:empty {
+  display: none;
 }
 .icon-tile {
   display: grid;
@@ -352,9 +380,6 @@ textarea {
   border-color: transparent;
   background: transparent;
   text-decoration: underline;
-}
-.recent {
-  grid-area: recent;
 }
 .section-heading {
   justify-content: space-between;
@@ -581,15 +606,6 @@ textarea {
     padding: 20px;
     gap: 18px;
   }
-  .main-content:has(.notice.hidden) {
-    grid-template-areas: "setup" "transfer" "devices" "actions" "folder" "recent";
-  }
-  .main-content:has(.connection.hidden) {
-    grid-template-areas: "notice" "transfer" "devices" "actions" "folder" "recent";
-  }
-  .main-content:has(.notice.hidden):has(.connection.hidden) {
-    grid-template-areas: "transfer" "devices" "actions" "folder" "recent";
-  }
   .transfer-card {
     padding: 16px;
   }
@@ -609,7 +625,6 @@ textarea {
   }
   .main-content {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "notice" "setup" "transfer" "devices" "actions" "folder" "recent";
     padding: 14px;
     gap: 18px;
   }
@@ -662,10 +677,7 @@ textarea {
     width: 100%;
   }
   .folder {
-    flex-wrap: wrap;
-  }
-  .folder > .text-button {
-    margin-left: 50px;
+    padding-inline: 10px;
   }
   dialog {
     width: calc(100% - 20px);

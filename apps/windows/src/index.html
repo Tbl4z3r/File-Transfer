@@ -17,9 +17,6 @@
         <symbol id="icon-transfer" viewBox="0 0 24 24">
           <path d="M4 7h16m-4-4 4 4-4 4M20 17H4m4-4-4 4 4 4" />
         </symbol>
-        <symbol id="icon-home" viewBox="0 0 24 24">
-          <path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-8H9v8H4a1 1 0 0 1-1-1Z" />
-        </symbol>
         <symbol id="icon-list" viewBox="0 0 24 24">
           <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />
         </symbol>
@@ -78,16 +75,6 @@
         </div>
       </header>
       <nav class="rail" aria-label="Accesos de File Transfer">
-        <button
-          id="home"
-          class="icon-button"
-          type="button"
-          aria-label="Inicio"
-          aria-current="page"
-        >
-          <svg class="icon" aria-hidden="true"><use href="#icon-home" /></svg
-          ><span class="tooltip" aria-hidden="true">Inicio</span>
-        </button>
         <button
           id="open-activity"
           class="icon-button"
@@ -150,60 +137,57 @@
         </section>
         <section class="current">
           <h2>Transferencia actual</h2>
-          <div id="batch-panel" class="panel hidden">
-            <p id="batch-status" role="status" aria-live="polite"></p>
-            <button id="cancel-batch" type="button">Cancelar lote</button>
-          </div>
           <div id="current-transfer" class="transfer-list">
             <div class="panel empty-state">
               <p>Sin transferencias en curso.</p>
             </div>
           </div>
-        </section>
-        <section class="devices">
-          <h2>Dispositivos</h2>
-          <div id="device-choices" class="device-list">
-            <p>Ningún dispositivo emparejado.</p>
+          <div id="batch-panel" class="panel batch-panel hidden">
+            <p id="batch-status" role="status" aria-live="polite"></p>
+            <ul id="batch-files" class="batch-files" aria-label="Archivos del lote" tabindex="0"></ul>
+            <button id="cancel-batch" type="button">Cancelar lote</button>
           </div>
         </section>
-        <section class="actions" aria-label="Enviar y recibir">
-          <button id="send-file" class="primary" type="button" disabled>
-            <svg class="icon" aria-hidden="true"><use href="#icon-up" /></svg
-            >Enviar archivos</button
-          ><button id="receive" type="button" aria-pressed="false" disabled>
-            <svg class="icon" aria-hidden="true"><use href="#icon-down" /></svg
-            ><span id="receive-label">Recibir</span>
-          </button>
-          <p id="action-hint" class="hint">
-            Inicia una sesión para conectar el móvil.
-          </p>
-        </section>
-        <section class="folder row" aria-label="Carpeta de recepción">
-          <span class="icon-tile"
-            ><svg class="icon" aria-hidden="true">
-              <use href="#icon-folder" /></svg
-          ></span>
-          <div class="grow">
-            <h2 class="quiet-label">Carpeta de recepción</h2>
-            <p id="folder-label">Se elige al aceptar cada archivo</p>
-            <p id="folder-hint" class="hint">
-              Puedes elegir una carpeta para esta sesión.
-            </p>
-          </div>
-          <button id="choose-folder" class="text-button" type="button" disabled>
-            Elegir
-          </button>
-        </section>
-        <section class="recent">
-          <div class="row section-heading">
-            <h2>Esta sesión</h2>
-            <button id="all-activity" class="text-button" type="button">
-              Ver todo
+        <div class="side-content">
+          <section class="devices">
+            <h2>Dispositivos</h2>
+            <div id="device-choices" class="device-list">
+              <p>Ningún dispositivo emparejado.</p>
+            </div>
+          </section>
+          <section class="actions" aria-label="Enviar y recibir">
+            <button id="send-file" class="primary" type="button" disabled>
+              <svg class="icon" aria-hidden="true"><use href="#icon-up" /></svg
+              >Enviar archivos</button
+            ><button id="receive" type="button" aria-pressed="false" disabled>
+              <svg class="icon" aria-hidden="true"><use href="#icon-down" /></svg
+              ><span id="receive-label">Recibir</span>
             </button>
-          </div>
-          <div id="recent-transfer"><p>Todavía no hay actividad.</p></div>
-        </section>
+            <p id="action-hint" class="hint">
+              Inicia una sesión para conectar el móvil.
+            </p>
+          </section>
+          <section class="recent">
+            <div class="row section-heading">
+              <h2>Esta sesión</h2>
+              <button id="all-activity" class="text-button" type="button">
+                Ver todo
+              </button>
+            </div>
+            <div id="recent-transfer"><p>Todavía no hay actividad.</p></div>
+          </section>
+        </div>
       </main>
+      <footer class="folder" aria-label="Carpeta de recepción">
+        <button id="choose-folder" class="folder-button" type="button" disabled>
+          <span class="icon-tile"><svg class="icon" aria-hidden="true"><use href="#icon-folder" /></svg></span>
+          <span class="folder-copy">
+            <span class="quiet-label">Carpeta de recepción</span>
+            <span id="folder-label">Se elige al aceptar cada archivo</span>
+            <span id="folder-hint" class="hint">Puedes elegir una carpeta para esta sesión.</span>
+          </span>
+        </button>
+      </footer>
     </div>
     <dialog id="activity-panel" aria-labelledby="activity-title">
       <div class="dialog-heading">

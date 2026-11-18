@@ -36,6 +36,7 @@ test("session form starts a real session command and closing clears the session 
   h.element("choose-folder").click();
   await h.settle();
   assert.equal(h.element("folder-label").textContent, "C:\\Recepcion");
+  assert.equal(h.element("choose-folder").getAttribute("title"), "C:\\Recepcion");
   h.element("stop-session").click();
   await h.settle();
   assert.equal(commands(h, "stop_session").length, 1);
@@ -235,7 +236,7 @@ test("activity includes terminal results and untrusted names stay literal text",
   assert.equal(h.element("activity-panel").open, true);
   assert.equal(h.element("open-activity").getAttribute("aria-current"), "page");
   h.element("activity-panel").close();
-  assert.equal(h.element("home").getAttribute("aria-current"), "page");
+  assert.equal(h.element("open-activity").getAttribute("aria-current"), null);
 });
 
 test("revoking a paired device uses its id, removes it, and renders cancelled transfer", async () => {

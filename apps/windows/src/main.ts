@@ -216,8 +216,8 @@ function notice(message: string, error = false): void {
     }
   }
 }
-function markRail(id = "home"): void {
-  for (const rail of ["home", ...Object.values(rails)]) {
+function markRail(id?: string): void {
+  for (const rail of Object.values(rails)) {
     if (rail === id) $(rail).setAttribute("aria-current", "page");
     else $(rail).removeAttribute("aria-current");
   }
@@ -345,7 +345,10 @@ function updateControls(): void {
   $("folder-hint").textContent = selectedDestination
     ? "Para las siguientes aceptaciones de esta sesión."
     : "Puedes elegir una carpeta para esta sesión.";
-  $("choose-folder").textContent = selectedDestination ? "Cambiar" : "Elegir";
+  $("choose-folder").setAttribute("aria-label", selectedDestination
+    ? `Cambiar carpeta de recepción: ${selectedDestination}`
+    : "Elegir carpeta de recepción");
+  $("choose-folder").setAttribute("title", selectedDestination ?? "Elegir carpeta de recepción");
   for (const button of document.querySelectorAll<HTMLButtonElement>(
     "[data-transfer-action], [data-revoke]",
   ))
@@ -744,10 +747,6 @@ $("copy-pair").onclick = () => {
       notice("Selecciona Copiar o pulsa Ctrl+C para copiar los datos.");
     }
   });
-};
-$("home").onclick = () => {
-  markRail();
-  $("home-content").focus();
 };
 $("open-activity").onclick = $("all-activity").onclick = () =>
   showPanel("activity-panel");
