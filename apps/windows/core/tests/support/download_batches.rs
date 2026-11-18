@@ -523,3 +523,60 @@ async fn disconnect_during_outbound_tls_stream_preserves_completed_and_cancels_r
     assert_eq!(local(&f)["files"][1]["state"], "cancelled");
     assert_eq!(local(&f)["files"][2]["state"], "not_sent");
 }
+
+#[tokio::test]
+async fn retry_offer_validates_source_and_marks_delivery_uncertainty_locally() {
+    use file_transfer_core::SourceStamp;
+
+    let f = Fixture::timed(Timeouts::default()).await;
+    let peer = f.pair().await;
+    let path = f.destination.path().join("retry.txt");
+    fs::write(&path, b"original").unwrap();
+    let metadata = fs::metadata(&path).unwrap();
+    let stamp = SourceStamp::new(metadata.len(), metadata.modified().unwrap());
+    let session = f.core.snapshot().session.unwrap().session_id;
+    fs::write(&path, b"same selection, changed contents").unwrap();
+    assert_eq!(
+        f.core
+            .offer_retry_download(&peer.id, &path, &session, &stamp)
+            .unwrap_err()
+            .code,
+        "source_changed",
+    );
+    assert_eq!(
+        f.core
+            .offer_retry_download_batch(
+                &peer.id,
+                vec![path.clone(), path.clone()],
+                &session,
+                &[stamp.clone(), stamp],
+            )
+            .unwrap_err()
+            .code,
+        "source_changed",
+    );
+
+    let batch = f.offer_batch(&peer, 2);
+    f.download_action(&peer, &batch, "accept", json!({})).await;
+    let transfer = f.download_start(&peer, &batch, 0).await;
+    assert!(!f.core.snapshot().transfers[0].delivery_uncertain);
+    let content = f
+        .auth(
+            &peer,
+            f.client.get(format!(
+                "{}/v1/transfers/{}/content",
+                f.base, transfer.transfer_id
+            )),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(content.bytes().await.unwrap(), b"file-0".as_slice());
+    f.core.revoke_peer(&peer.id).unwrap();
+    let snapshot = f.core.snapshot();
+    assert_eq!(
+        snapshot.transfers[0].transfer.state,
+        TransferState::Cancelled
+    );
+    assert!(snapshot.transfers[0].delivery_uncertain);
+}

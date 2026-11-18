@@ -11,6 +11,7 @@ type Transfer = {
   sha256?: string;
   peer_id: string;
   destination: string | null;
+  delivery_uncertain?: boolean;
 };
 type BatchFile = {
   file_name: string;
@@ -24,7 +25,12 @@ type TransferBatch = {
   state: string;
   files: BatchFile[];
 };
-type Source = { source: string; file_name: string; size_bytes: string };
+type Source = {
+  source: string;
+  file_name: string;
+  size_bytes: string;
+  modified: string;
+};
 type BatchStatus = { batch_id: string; state: string };
 type Snapshot = {
   session: null | {
@@ -106,7 +112,21 @@ type SendBatch = {
   state: string;
   index: number;
   transferId: string | null;
+  retry: boolean;
+  skipped: number;
 };
+type OutgoingAttempt = {
+  sessionId: string;
+  peerName: string;
+  peerId: string;
+  sources: Source[];
+  results: ("pending" | "completed" | "unfinished" | "uncertain")[];
+  manifestId?: string;
+  queue?: SendBatch;
+  finished: boolean;
+};
+let outgoingAttempt: OutgoingAttempt | null = null;
+let retryTarget = "";
 let batch: SendBatch | null = null;
 let shownSendBatch: SendBatch | null = null;
 let shownUploadBatch: TransferBatch | null = null;
@@ -157,10 +177,12 @@ async function sendNext(current: SendBatch): Promise<void> {
   offering = true;
   updateControls();
   try {
+    const source = current.sources[current.index];
     const transfer = await invoke<Transfer>("offer_download", {
       peerId: current.peerId,
-      source: current.sources[current.index].source,
+      source: source.source,
       sessionId: current.sessionId,
+      ...(current.retry ? { expected: sourceStamp(source) } : {}),
     });
     Object.assign(current.sources[current.index], {
       file_name: transfer.file_name,
@@ -182,7 +204,7 @@ async function sendNext(current: SendBatch): Promise<void> {
     }
     offerRevision++;
     current.transferId = transfer.transfer_id;
-    notice("Oferta enviada. Confirma cada archivo en el móvil.");
+    notice(retrySkipMessage(current.skipped) + "Oferta enviada. Confirma cada archivo en el móvil.");
   } catch (error) {
     if (batch === current) {
       current.sources[current.index].state = "failed";
@@ -260,6 +282,7 @@ const panels = [
   "devices-panel",
   "settings-panel",
   "pair-panel",
+  "retry-panel",
 ];
 const rails: Record<string, string> = {
   "activity-panel": "open-activity",
@@ -341,9 +364,10 @@ async function action(run: () => Promise<void>): Promise<void> {
 }
 function formatBytes(value: bigint): string {
   const n = Number(value);
-  if (n < 1024) return `${n} B`;
-  const unit = Math.min(Math.floor(Math.log(n) / Math.log(1024)), 4);
-  return `${(n / 1024 ** unit).toLocaleString("es", { maximumFractionDigits: 1 })} ${["B", "KiB", "MiB", "GiB", "TiB"][unit]}`;
+  const units = ["B", "kB", "MB", "GB", "TB"];
+  let unit = 0;
+  while (unit < units.length - 1 && n >= 1000 ** (unit + 1)) unit++;
+  return `${(n / 1000 ** unit).toLocaleString("es", { maximumFractionDigits: 1 })} ${units[unit]}`;
 }
 function terminal(state: string): boolean {
   return ["completed", "failed", "cancelled"].includes(state);
@@ -409,6 +433,7 @@ function updateControls(): void {
     Boolean(batch) ||
     offering;
   renderBatch();
+  renderRetry();
   $("receive").setAttribute(
     "aria-pressed",
     String(latest?.receive_enabled ?? false),
@@ -510,6 +535,11 @@ function renderBatch(): void {
   cancel.hidden = !files.length || terminal(state);
   cancel.disabled = busy || terminal(state) || (!incoming && !download && !batch);
   cancel.textContent = waiting ? "Rechazar lote" : "Cancelar lote";
+  const retryReceive = $<HTMLButtonElement>("retry-receive-batch");
+  retryReceive.hidden = !incoming ||
+    (state !== "failed" && (state !== "cancelled" ||
+      Boolean(latest?.peers.some((peer) => peer.id === incoming.peer_id))));
+  retryReceive.disabled = busy;
   const completed = files.filter((f) => f.state === "completed").length;
   const label =
     state === "awaiting_acceptance"
@@ -551,6 +581,15 @@ function renderBatch(): void {
       `${formatBytes(BigInt(file.size_bytes))} · ${batchFileLabel(file, Boolean(incoming), state)}`;
   });
 }
+async function prepareReceive(peerId: string): Promise<void> {
+  await action(async () => {
+    if (!latest?.session) throw "session_closed";
+    if (!latest.receive_enabled) await invoke("set_receive_enabled", { enabled: true });
+    if (!latest.peers.some((peer) => peer.id === peerId)) await showPairing();
+    notice("Pide al móvil que vuelva a enviar los archivos pendientes. La nueva solicitud necesita tu autorización.");
+  });
+}
+
 async function acceptIncomingBatch(): Promise<void> {
   const pending = latest?.upload_batch;
   const sessionId = latest?.session?.session_id;
@@ -672,6 +711,16 @@ function transferView(detailed: boolean): TransferView {
       if (signature !== actionSignature) {
         actionSignature = signature;
         actions.replaceChildren();
+        if (
+          t.direction === "upload" &&
+          (t.state === "failed" || (t.state === "cancelled" && t.error_code === "revoked"))
+        ) {
+          const reconnect = node("button", "", "Reintentar recepción");
+          reconnect.type = "button";
+          reconnect.dataset.transferAction = "prepare-receive";
+          reconnect.onclick = () => { void prepareReceive(t.peer_id); };
+          actions.append(reconnect);
+        }
         if (!terminal(t.state) && !inBatch) {
           if (t.direction === "upload" && t.state === "awaiting_acceptance") {
             const accept = node(
@@ -707,7 +756,7 @@ function transferView(detailed: boolean): TransferView {
           actions.append(cancel);
         }
       }
-      actions.hidden = terminal(t.state);
+      actions.hidden = actions.children.length === 0;
     },
   };
 }
@@ -852,6 +901,7 @@ async function refreshNow(): Promise<void> {
         )
       : [];
   if (sessionId !== listSessionId) {
+    retryTarget = "";
     if (batch && batch.sessionId !== sessionId) discardBatch();
     shownSendBatch = null;
     shownUploadBatch = null;
@@ -945,6 +995,7 @@ async function refreshNow(): Promise<void> {
         });
     }
   advanceBatch(latest);
+  updateOutgoingAttempt(snapshot);
   if (disappeared.length)
     notice(
       `${disappeared.map((peer) => peer.name).join(", ")} ${disappeared.length === 1 ? "se ha desconectado" : "se han desconectado"}. Para volver a conectar, muestra un nuevo QR y escanéalo en el móvil.`,
@@ -992,58 +1043,191 @@ $("choose-folder").onclick = () => {
     if (destination) selectedDestination = destination;
   });
 };
-$("send-file").onclick = () => {
-  void action(async () => {
-    const peerId = selectedPeer;
-    const sessionId = latest?.session?.session_id;
-    if (
-      !peerId || !sessionId || batch || offering ||
-      incomingReserved() || outgoingReserved()
-    ) return;
-    const sources = await invoke<Source[] | null>("choose_sources");
-    if (!sources?.length) return;
-    if (
-      latest?.session?.session_id !== sessionId ||
-      !latest.peers.some((peer) => peer.id === peerId) ||
-      incomingReserved() ||
-      outgoingReserved() ||
-      latest.transfers.some((t) => !terminal(t.state))
-    )
-      return;
-    if (
-      sources.length > 1 &&
-      latest.peers.find((peer) => peer.id === peerId)?.supports_inbox
-    ) {
-      await invoke<BatchStatus>("offer_download_batch", {
-        peerId,
-        sources: sources.map((source) => source.source),
-        sessionId,
-      });
-      offerRevision++;
-      shownSendBatch = null;
-      shownUploadBatch = null;
-      notice("Oferta de lote enviada. Esperando aceptación en el móvil.");
-      return;
-    }
+function canOffer(sessionId: string, peerId: string): boolean {
+  return Boolean(
+    sessionId && latest?.session?.session_id === sessionId &&
+    latest.peers.some((peer) => peer.id === peerId) &&
+    !batch && !offering && !incomingReserved() && !outgoingReserved() &&
+    !latest.transfers.some((t) => !terminal(t.state)),
+  );
+}
+
+function sourceStamp({ size_bytes, modified }: Source): Pick<Source, "size_bytes" | "modified"> {
+  return { size_bytes, modified };
+}
+
+function retrySkipMessage(skipped: number): string {
+  if (skipped === 0) return "";
+  if (skipped === 1) return "Se omitió un archivo que cambió o ya no está disponible. ";
+  return `Se omitieron ${skipped} archivos que cambiaron o ya no están disponibles. `;
+}
+
+async function offerSelection(
+  sources: Source[], peerId: string, sessionId: string, retry = false, skipped = 0,
+): Promise<void> {
+  if (!canOffer(sessionId, peerId)) throw "busy";
+  const attempt: OutgoingAttempt = {
+    sessionId,
+    peerName: peerName(peerId),
+    peerId,
+    sources,
+    results: sources.map(() => "pending"),
+    finished: false,
+  };
+  if (sources.length > 1 && latest?.peers.find((peer) => peer.id === peerId)?.supports_inbox) {
+    const manifest = await invoke<BatchStatus>("offer_download_batch", {
+      peerId,
+      sources: sources.map((source) => source.source),
+      sessionId,
+      ...(retry ? { expected: sources.map(sourceStamp) } : {}),
+    });
+    attempt.manifestId = manifest.batch_id;
+    offerRevision++;
+    shownSendBatch = null;
+    shownUploadBatch = null;
+    notice(retrySkipMessage(skipped) + "Oferta de lote enviada. Esperando aceptación en el móvil.");
+  } else {
     shownDownloadBatch = null;
     batch = {
       peerId,
       sessionId,
-      sources: sources.map((f) => ({
-        ...f,
+      sources: sources.map((file) => ({
+        ...file,
         transfer_id: null,
         state: "pending",
       })),
       index: 0,
       transferId: null,
       state: "accepted",
+      retry,
+      skipped,
     };
+    attempt.queue = batch;
     shownSendBatch = batch;
     shownUploadBatch = null;
-    notice(
-      `Lote preparado: ${sources.length} archivos. Confirma cada archivo en el móvil.`,
-    );
+    notice(retrySkipMessage(skipped) + `Lote preparado: ${sources.length} archivos. Confirma cada archivo en el móvil.`);
+  }
+  outgoingAttempt = attempt;
+}
+
+function updateOutgoingAttempt(snapshot: Snapshot): void {
+  const attempt = outgoingAttempt;
+  if (!attempt || attempt.finished) return;
+  const sameSession = attempt.sessionId === snapshot.session?.session_id;
+  const manifest = snapshot.download_batch?.batch_id === attempt.manifestId
+    ? snapshot.download_batch : null;
+  if (sameSession && attempt.manifestId && !manifest) return;
+  if (sameSession && offering && attempt.queue) return;
+  const files = manifest?.files ?? attempt.queue?.sources;
+  const finished = !sameSession || terminal(manifest?.state ?? attempt.queue?.state ?? "");
+  attempt.results = attempt.results.map((previous, index) => {
+    const file = files?.[index];
+    if (previous === "completed" || file?.state === "completed") return "completed";
+    if (!finished) return previous;
+    if (!file) return "uncertain";
+    if (!file.transfer_id) return "unfinished";
+    const transfer = sameSession
+      ? snapshot.transfers.find((item) => item.transfer_id === file.transfer_id)
+      : undefined;
+    if (!transfer || transfer.delivery_uncertain) return "uncertain";
+    return transfer.state === "completed" ? "completed" : "unfinished";
   });
+  attempt.finished = finished;
+}
+
+function renderRetry(): void {
+  const attempt = outgoingAttempt;
+  const results = attempt?.results ?? [];
+  const available = Boolean(attempt?.finished && results.some((state) => state !== "completed"));
+  $("retry-summary").classList.toggle("hidden", !available);
+  if (!available || !attempt) return;
+  const count = results.filter((state) => state !== "completed").length;
+  $("retry-label").textContent = `${attempt.peerName} · ${count} sin confirmación de ${results.length} archivos`;
+  const retry = $<HTMLButtonElement>("retry-send");
+  retry.disabled = busy || offering || Boolean(batch);
+  const choices = $("retry-devices");
+  if ($<HTMLDialogElement>("retry-panel").open) {
+    const peers = latest?.peers ?? [];
+    const signature = JSON.stringify([peers, retryTarget, busy]);
+    if (choices.dataset.signature !== signature) {
+      choices.dataset.signature = signature;
+      choices.replaceChildren(...peers.map((peer) => {
+        const button = node("button", "", `${peer.name} · ${peer.id.slice(0, 8)}`);
+        button.type = "button";
+        button.disabled = busy;
+        button.setAttribute("aria-pressed", String(peer.id === retryTarget));
+        button.onclick = () => {
+          retryTarget = peer.id;
+          renderRetry();
+        };
+        return button;
+      }));
+    }
+    const uncertain = results.includes("uncertain");
+    $("retry-uncertain").classList.toggle("hidden", !uncertain);
+    $("retry-uncertain-files").textContent = attempt.sources
+      .filter((_, index) => results[index] === "uncertain")
+      .map((source) => source.file_name)
+      .join(", ");
+    const originalPaired = peers.some((peer) => peer.id === attempt.peerId);
+    $("retry-hint").textContent = originalPaired
+      ? "Elige el móvil de destino. El móvil deberá aceptar un nuevo envío."
+      : "Si tu móvil no aparece, vuelve a emparejarlo con un QR. Confirma el destino antes de ofrecer los archivos.";
+    $<HTMLButtonElement>("retry-pair").hidden = originalPaired;
+    $<HTMLButtonElement>("retry-confirm").disabled = busy ||
+      !canOffer(latest?.session?.session_id ?? "", retryTarget) ||
+      (!results.includes("unfinished") && !$<HTMLInputElement>("retry-include").checked);
+  }
+}
+
+$("retry-send").onclick = () => {
+  if (!latest?.session) {
+    notice("Inicia una sesión y empareja el móvil para reintentar.");
+    return;
+  }
+  retryTarget = "";
+  $<HTMLInputElement>("retry-include").checked = false;
+  showPanel("retry-panel");
+  renderRetry();
+};
+$("retry-include").onchange = renderRetry;
+$("retry-pair").onclick = () => { void action(showPairing); };
+$("retry-confirm").onclick = () => {
+  const attempt = outgoingAttempt;
+  const sessionId = latest?.session?.session_id ?? "";
+  const peerId = retryTarget;
+  if (!attempt?.finished || !canOffer(sessionId, peerId)) return;
+  const includeUncertain = $<HTMLInputElement>("retry-include").checked;
+  void action(async () => {
+    const requested = attempt.sources.filter((_, index) =>
+      attempt.results[index] === "unfinished" ||
+      (includeUncertain && attempt.results[index] === "uncertain"),
+    );
+    const sources = await invoke<Source[]>("available_retry_sources", { sources: requested });
+    if (!canOffer(sessionId, peerId)) throw "busy";
+    const skipped = requested.length - sources.length;
+    if (!sources.length) {
+      notice("Los archivos pendientes ya no están disponibles o cambiaron. Selecciónalos de nuevo si quieres enviarlos.", true);
+      return;
+    }
+    await offerSelection(sources, peerId, sessionId, true, skipped);
+    $<HTMLDialogElement>("retry-panel").close();
+  });
+};
+
+$("send-file").onclick = () => {
+  void action(async () => {
+    const peerId = selectedPeer;
+    const sessionId = latest?.session?.session_id ?? "";
+    if (!canOffer(sessionId, peerId)) return;
+    const sources = await invoke<Source[] | null>("choose_sources");
+    if (sources?.length && canOffer(sessionId, peerId)) {
+      await offerSelection(sources, peerId, sessionId);
+    }
+  });
+};
+$("retry-receive-batch").onclick = () => {
+  if (shownUploadBatch) void prepareReceive(shownUploadBatch.peer_id);
 };
 $("accept-batch").onclick = () => {
   void acceptIncomingBatch();

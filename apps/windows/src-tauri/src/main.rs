@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod network;
 use file_transfer_core::{
-    BatchStatus, Engine, Snapshot,
+    BatchStatus, Engine, Snapshot, SourceStamp,
     model::{Descriptor, Transfer},
 };
 use std::{net::Ipv4Addr, path::PathBuf, sync::Arc};
@@ -95,9 +95,13 @@ fn offer_download(
     peer_id: String,
     source: PathBuf,
     session_id: String,
+    expected: Option<SourceStamp>,
 ) -> Result<Transfer, String> {
-    core.offer_download_in_session(&peer_id, source, &session_id)
-        .map_err(|e| e.code.to_owned())
+    match expected {
+        Some(stamp) => core.offer_retry_download(&peer_id, &source, &session_id, &stamp),
+        None => core.offer_download_in_session(&peer_id, source, &session_id),
+    }
+    .map_err(|e| e.code.to_owned())
 }
 #[tauri::command]
 fn offer_download_batch(
@@ -105,9 +109,13 @@ fn offer_download_batch(
     peer_id: String,
     sources: Vec<PathBuf>,
     session_id: String,
+    expected: Option<Vec<SourceStamp>>,
 ) -> Result<BatchStatus, String> {
-    core.offer_download_batch(&peer_id, sources, &session_id)
-        .map_err(|e| e.code.to_owned())
+    match expected {
+        Some(stamps) => core.offer_retry_download_batch(&peer_id, sources, &session_id, &stamps),
+        None => core.offer_download_batch(&peer_id, sources, &session_id),
+    }
+    .map_err(|e| e.code.to_owned())
 }
 #[tauri::command]
 fn cancel_download_batch(core: Core<'_>, batch_id: String) -> Result<BatchStatus, String> {
@@ -118,11 +126,12 @@ fn cancel_download_batch(core: Core<'_>, batch_id: String) -> Result<BatchStatus
 fn cancel_transfer(core: Core<'_>, transfer_id: String) -> Result<Transfer, String> {
     core.cancel(&transfer_id).map_err(|e| e.code.to_owned())
 }
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct ChosenSource {
     source: PathBuf,
     file_name: String,
-    size_bytes: String,
+    #[serde(flatten)]
+    stamp: SourceStamp,
 }
 #[tauri::command]
 async fn choose_sources(app: tauri::AppHandle) -> Result<Option<Vec<ChosenSource>>, String> {
@@ -147,12 +156,36 @@ async fn choose_sources(app: tauri::AppHandle) -> Result<Option<Vec<ChosenSource
                     Ok(ChosenSource {
                         source,
                         file_name,
-                        size_bytes: metadata.len().to_string(),
+                        stamp: SourceStamp::new(
+                            metadata.len(),
+                            metadata.modified().map_err(|_| "io_error".to_owned())?,
+                        ),
                     })
                 })
                 .collect()
         })
         .transpose()
+}
+#[tauri::command]
+async fn available_retry_sources(sources: Vec<ChosenSource>) -> Result<Vec<ChosenSource>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sources
+            .into_iter()
+            .filter(|source| {
+                let Ok(file) = std::fs::File::open(&source.source) else {
+                    return false;
+                };
+                file.metadata().is_ok_and(|metadata| {
+                    metadata.is_file()
+                        && metadata.modified().is_ok_and(|modified| {
+                            source.stamp == SourceStamp::new(metadata.len(), modified)
+                        })
+                })
+            })
+            .collect()
+    })
+    .await
+    .map_err(|_| "io_error".to_owned())
 }
 #[tauri::command]
 async fn choose_destination(app: tauri::AppHandle) -> Result<Option<PathBuf>, String> {
@@ -195,6 +228,7 @@ fn main() {
             cancel_download_batch,
             cancel_transfer,
             choose_sources,
+            available_retry_sources,
             choose_destination
         ])
         .run(tauri::generate_context!())
