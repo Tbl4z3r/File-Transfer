@@ -7,6 +7,9 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.net.Uri
+import android.provider.DocumentsContract
+import android.widget.Toast
 import android.provider.OpenableColumns
 import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
@@ -20,6 +23,10 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import java.io.File
@@ -41,13 +48,18 @@ class MainActivity : ComponentActivity() {
         val destination = mutableStateOf("")
         val busy = mutableStateOf(false)
         val pending = mutableStateOf<Pair<String, String>?>(null)
-        val lastReceived = mutableStateOf<ReceivedDocument?>(null)
         val diagnostic = mutableStateOf<String?>(null)
         val offer = mutableStateOf<Transfer?>(null)
         val batchOffer = mutableStateOf<DownloadOfferBatch?>(null)
         val transfer = mutableStateOf<TransferPresentation?>(null)
         val sendQueue = mutableStateOf<SendQueueProgress?>(null)
         val activity = mutableStateOf(listOf<TransferPresentation>())
+
+        fun record(entry: TransferPresentation) {
+            activity.value = (activity.value.filterNot { entry.id != null && it.id == entry.id } + entry).takeLast(32)
+        }
+
+        fun historyTrees() = activity.value.mapNotNull { it.receipt?.location?.tree }.toSet()
     }
     private lateinit var session: Session
     private val worker get() = session.worker
@@ -92,11 +104,11 @@ class MainActivity : ComponentActivity() {
         session.pending.value = null
         session.pendingUploadBatchId = null
         session.transfer.value?.takeIf { it.result == null }?.let { current ->
-            val result = if (current.direction == "download" && current.phase == "Confirmando con el PC")
+            val result = if (current.receipt != null)
                 "Guardado y verificado; sesión remota terminada" else "Interrumpida; sesión terminada"
             val entry = current.copy(result = result)
             session.transfer.value = entry
-            session.activity.value = (session.activity.value.filterNot { entry.id != null && it.id == entry.id } + entry).takeLast(32)
+            session.record(entry)
         }
         session.sendQueue.value = session.sendQueue.value?.copy(running = false)
         if (p != null) bestEffortDisconnect(p)
@@ -110,7 +122,10 @@ class MainActivity : ComponentActivity() {
         session = (lastCustomNonConfigurationInstance as? Session) ?: Session()
         enableEdgeToEdge()
         val receiveStorage = ReceiveStorage(applicationContext)
-        if (session.destination.value.isEmpty()) session.destination.value = receiveStorage.destinationLabel()
+        if (session.destination.value.isEmpty()) {
+            receiveStorage.pruneHistoryGrants(emptySet())
+            session.destination.value = receiveStorage.destinationLabel()
+        }
         File(filesDir, "partial").apply { mkdirs(); if (lastCustomNonConfigurationInstance == null) listFiles()?.forEach { it.delete() } }
         PairStore(this) // Discard credentials left by older versions; never restore pairing.
         setContent {
@@ -122,15 +137,65 @@ class MainActivity : ComponentActivity() {
             var address by remember { mutableStateOf(pair?.host ?: "") }
             var portText by remember { mutableStateOf(pair?.port?.toString() ?: "") }
             var pending by remember { session.pending }
-            var lastReceived by remember { session.lastReceived }
             var destination by remember { session.destination }
             var diagnostic by remember { session.diagnostic }
             var offer by remember { session.offer }
             var transfer by remember { session.transfer }
             var sendQueue by remember { session.sendQueue }
-            var activity by remember { session.activity }
+            val activity by remember { session.activity }
             var batchOffer by remember { session.batchOffer }
             var dialog by remember { mutableStateOf<String?>(null) }
+            var folderLocation by remember { mutableStateOf<ReceiveLocation?>(null) }
+            var folderPath by remember { mutableStateOf(listOf<ReceiveFolderEntry>()) }
+            var folderEntries by remember { mutableStateOf<List<ReceiveFolderEntry>?>(null) }
+            var folderError by remember { mutableStateOf(false) }
+            var folderOrigin by remember { mutableStateOf<String?>(null) }
+            LaunchedEffect(dialog, folderLocation, folderPath) {
+                if (dialog != "browse_folder") return@LaunchedEffect
+                val location = folderLocation ?: return@LaunchedEffect
+                val folder = folderPath.lastOrNull()?.uri
+                folderEntries = null
+                folderError = false
+                val result = withContext(Dispatchers.IO) { runCatching { receiveStorage.listFolder(location, folder) } }
+                folderEntries = result.getOrNull()
+                folderError = result.isFailure
+            }
+
+            fun openFile(uri: Uri, tree: Uri? = null) {
+                lifecycleScope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        runCatching {
+                            val document = if (tree != null && !DocumentsContract.isTreeUri(uri))
+                                DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getDocumentId(uri)) else uri
+                            val exists = contentResolver.query(document, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                                ?.use { it.moveToFirst() } == true
+                            check(exists)
+                            val mime = contentResolver.getType(document) ?: "application/octet-stream"
+                            Intent(Intent.ACTION_VIEW).setDataAndType(document, mime)
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                .apply { clipData = ClipData.newRawUri("Archivo recibido", document) }
+                        }
+                    }
+                    if (runCatching { startActivity(result.getOrThrow()) }.isFailure) {
+                        Toast.makeText(this@MainActivity, "No se pudo abrir el archivo. Comprueba que siga disponible y que haya una aplicación compatible.", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+
+            fun openLocation(location: ReceiveLocation) {
+                if (location.tree != null && runCatching {
+                        val directory = receiveStorage.directory(location.tree)
+                        startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(directory, DocumentsContract.Document.MIME_TYPE_DIR)
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            .apply { clipData = ClipData.newRawUri("Carpeta de recepción", directory) })
+                    }.isSuccess) return
+                folderPath = emptyList()
+                folderEntries = null
+                folderError = false
+                folderLocation = location
+                folderOrigin = dialog
+                dialog = "browse_folder"
+            }
             LaunchedEffect(pair) { pair?.let { address = it.host; portText = it.port.toString() } }
 
             fun finish(result: String) {
@@ -138,7 +203,7 @@ class MainActivity : ComponentActivity() {
                     transfer?.let {
                         val entry = it.copy(result = result)
                         transfer = entry
-                        activity = (activity.filterNot { old -> entry.id != null && old.id == entry.id } + entry).takeLast(32)
+                        session.record(entry)
                     }
                 }
             }
@@ -235,7 +300,7 @@ class MainActivity : ComponentActivity() {
             val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
                 val uri = result.data?.data
                 if (result.resultCode == Activity.RESULT_OK && uri != null) post("choose_folder") {
-                    val label = receiveStorage.selectTree(uri, result.data!!.flags)
+                    val label = receiveStorage.selectTree(uri, result.data!!.flags, session.historyTrees())
                     updateUi { destination = label; message = "Carpeta de recepción actualizada." }
                 }
             }
@@ -301,7 +366,7 @@ class MainActivity : ComponentActivity() {
                                     item = entry
                                     updateUi {
                                         transfer = entry
-                                        activity = (activity.filterNot { old -> entry.id != null && old.id == entry.id } + entry).takeLast(32)
+                                        session.record(entry)
                                     }
                                 }
                                 show()
@@ -440,9 +505,16 @@ class MainActivity : ComponentActivity() {
                     val received = receiveStorage.publish(temp, selected.name, selected.size, hash) { cancelled }
                     published = true
                     temp.delete()
-                    updateUi { lastReceived = received }
+                    val generation = session.operationGeneration.get()
+                    runOnUiThread {
+                        val connected = generation == session.generation
+                        val entry = TransferPresentation(received.name, selected.size, "download", bytes = selected.size,
+                            phase = "Confirmando con el PC", id = selected.id, receipt = received,
+                            result = if (connected) null else "Guardado y verificado; sesión remota terminada")
+                        if (connected) transfer = entry
+                        session.record(entry)
+                    }
                     operationStage = "confirm"
-                    phase("Confirmando con el PC")
                     try { require(c.complete(selected.id, hash).let { it.id == selected.id && it.state == "completed" && it.sha256 == hash }) }
                     catch (error: Exception) {
                         val remoteState = if (sameGeneration()) runCatching { c.status(selected.id) }.getOrNull() else null
@@ -522,7 +594,7 @@ class MainActivity : ComponentActivity() {
                     },
                     cancellable = busy && operationStage != "choose_folder",
                     message = message, transfer = transfer, sendQueue = sendQueue, offer = visibleOffer, batchOffer = batchOffer, activity = activity,
-                    hasPending = pending != null, hasDiagnostic = diagnostic != null, canOpenReceived = lastReceived != null,
+                    hasPending = pending != null, hasDiagnostic = diagnostic != null,
                     onSettings = { dialog = "settings" },
                     onScan = {
                         if (!packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) message = "No hay cámara disponible. Usa la conexión manual en Ajustes."
@@ -582,12 +654,8 @@ class MainActivity : ComponentActivity() {
                         diagnostic?.let { (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Diagnóstico File Transfer", it)) }
                         message = "Diagnóstico copiado; no incluye credenciales ni rutas de archivos."
                     },
-                    onActivity = { dialog = "activity" }, onOpenReceived = {
-                        lastReceived?.let { received -> runCatching {
-                            val intent = Intent(Intent.ACTION_VIEW).setDataAndType(received.uri, contentResolver.getType(received.uri) ?: "*/*").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            startActivity(Intent.createChooser(intent, "Abrir archivo"))
-                        }.onFailure { message = "No se pudo abrir el archivo. Comprueba que siga disponible y que haya una aplicación compatible." } }
-                    },
+                    onActivity = { dialog = "activity" },
+                    onOpenReceived = { openFile(it.uri, it.location.tree) }, onOpenLocation = ::openLocation,
                 )
                 when (dialog) {
                     "batch_detail" -> EssentialDialog("Detalle del lote", { dialog = null }) {
@@ -628,16 +696,31 @@ class MainActivity : ComponentActivity() {
                     }
                     "folder" -> EssentialDialog("Carpeta de recepción", { dialog = null }) {
                         Text(destination)
+                        TextButton(onClick = { openLocation(ReceiveLocation(receiveStorage.selectedTree(), destination)) }) { Text("Abrir carpeta") }
                         Button(onClick = { chooseFolder() }, enabled = !busy) { Text("Elegir carpeta") }
                         if (receiveStorage.selectedTree() != null) TextButton(enabled = !busy, onClick = {
                             dialog = null
-                            post("choose_folder") { receiveStorage.usePrivateInbox(); updateUi { destination = receiveStorage.destinationLabel(); message = "Se usará la bandeja privada de la aplicación." } }
+                            post("choose_folder") { receiveStorage.usePrivateInbox(session.historyTrees()); updateUi { destination = receiveStorage.destinationLabel(); message = "Se usará la bandeja privada de la aplicación." } }
                         }) { Text("Usar bandeja privada") }
                         Text("Si Android no permite elegir la raíz de Descargas, crea una subcarpeta como File Transfer.", style = MaterialTheme.typography.bodySmall)
                     }
                     "activity" -> EssentialDialog("Actividad de esta sesión", { dialog = null }) {
                         if (activity.isEmpty()) Text("Todavía no hay transferencias.")
-                        activity.asReversed().forEach { FileRow(it.name, "${it.result ?: it.phase} · ${formatBytes(it.size)}") }
+                        activity.asReversed().forEach { entry ->
+                            ActivityRow(entry, { openFile(it.uri, it.location.tree) }, ::openLocation)
+                        }
+                    }
+                    "browse_folder" -> folderLocation?.let { location ->
+                        ReceiveFolderDialog(
+                            title = folderPath.lastOrNull()?.name ?: location.label,
+                            entries = folderEntries,
+                            failed = folderError,
+                            onParent = if (folderPath.isEmpty()) null else ({ folderPath = folderPath.dropLast(1) }),
+                            onEntry = { entry ->
+                                if (entry.isDirectory) folderPath = folderPath + entry else openFile(entry.uri, location.tree)
+                            },
+                            onDismiss = { folderLocation = null; dialog = folderOrigin },
+                        )
                     }
                     "pending" -> AlertDialog(containerColor = MaterialTheme.colorScheme.surface, onDismissRequest = { dialog = null }, title = { Text("¿Cerrar la confirmación pendiente?") }, text = {
                         Text(if (transfer?.direction == "download") "El archivo recibido y verificado se conservará. Puedes cerrar este aviso y realizar otra transferencia." else "El PC aún no ha confirmado que guardó el archivo. Cerrar abandona esta confirmación y cancela el resto del lote. Comprueba el destino antes de volver a enviarlo.")
