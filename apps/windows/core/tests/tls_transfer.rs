@@ -885,3 +885,6 @@ async fn desktop_offer_is_bound_to_the_selected_session_even_after_same_address_
         .unwrap();
     f.core.stop_session();
 }
+
+#[path = "support/upload_batches.rs"]
+mod upload_batches;

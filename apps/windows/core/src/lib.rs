@@ -1,6 +1,8 @@
 pub mod model;
 mod server;
 mod store;
+mod upload_batch;
+pub use upload_batch::{BatchState, BatchStatus, LocalUploadBatch};
 
 use base64::{
     Engine as _,
@@ -42,6 +44,7 @@ pub struct Snapshot {
     pub receive_enabled: bool,
     pub peers: Vec<Peer>,
     pub transfers: Vec<LocalTransfer>,
+    pub upload_batch: Option<LocalUploadBatch>,
 }
 #[derive(Clone, Copy)]
 pub struct Timeouts {
@@ -95,6 +98,7 @@ struct Inner {
     session: Option<ActiveSession>,
     closing: Option<Arc<AtomicBool>>,
     receive: bool,
+    upload_batch: Option<upload_batch::UploadBatch>,
 }
 pub struct Engine {
     directory: PathBuf,
@@ -162,6 +166,7 @@ impl Engine {
                 session: None,
                 closing: None,
                 receive: false,
+                upload_batch: None,
             }),
             timeouts,
             _storage_lock: lock,
@@ -207,6 +212,7 @@ impl Engine {
             self.terminate(&mut inner, &id, TransferState::Cancelled, "session_closed");
         }
         inner.records.clear();
+        inner.upload_batch = None;
     }
     pub fn open_pairing_window(&self) -> Result<Descriptor> {
         let mut inner = self.lock();
@@ -266,6 +272,13 @@ impl Engine {
             .collect();
         for transfer in ids {
             self.terminate(&mut inner, &transfer, TransferState::Cancelled, "revoked");
+        }
+        if inner
+            .upload_batch
+            .as_ref()
+            .is_some_and(|b| b.local.peer_id == id)
+        {
+            self.stop_upload_batch_locked(&mut inner, BatchState::Cancelled, "revoked");
         }
         Ok(())
     }
@@ -349,6 +362,7 @@ impl Engine {
             .ok_or(Fault::new(404, "not_found"))
     }
     fn expire_locked(&self, inner: &mut Inner) {
+        self.expire_upload_batch_locked(inner);
         if inner
             .window
             .as_ref()
@@ -410,6 +424,7 @@ impl Engine {
                 let _ = self.save_registry(&inner.registry);
             }
         }
+        Self::sync_upload_batch_locked(inner);
     }
     fn new_record(
         inner: &mut Inner,
@@ -418,12 +433,15 @@ impl Engine {
         size: u64,
         direction: Direction,
         source: Option<Source>,
+        batch_entry: bool,
     ) -> Result<Transfer> {
         if inner.session.is_none() {
             return Err(Fault::new(409, "session_closed"));
         }
         Self::ensure_peer(inner, peer)?;
-        if inner.records.iter().any(|r| !r.transfer.state.terminal()) {
+        if (!batch_entry && Self::upload_batch_busy(inner))
+            || inner.records.iter().any(|r| !r.transfer.state.terminal())
+        {
             return Err(Fault::new(409, "busy"));
         }
         while inner.records.len() >= 32 {
@@ -477,6 +495,7 @@ impl Engine {
             size,
             Direction::Upload,
             None,
+            false,
         )
     }
     pub fn offer_download(&self, peer: &str, source: impl AsRef<Path>) -> Result<Transfer> {
@@ -535,6 +554,7 @@ impl Engine {
             snapshot.len,
             Direction::Download,
             Some(snapshot),
+            false,
         )
     }
     pub fn accept_upload(&self, id: &str, destination: impl AsRef<Path>) -> Result<Transfer> {
@@ -551,7 +571,16 @@ impl Engine {
         {
             return Err(Fault::new(409, "invalid_state"));
         }
-        let directory = fs::canonicalize(destination.as_ref()).map_err(|e| io_fault(&e))?;
+        self.accept_upload_locked(&mut inner, index, destination.as_ref())
+    }
+    fn accept_upload_locked(
+        &self,
+        inner: &mut Inner,
+        index: usize,
+        destination: &Path,
+    ) -> Result<Transfer> {
+        let record = &inner.records[index];
+        let directory = fs::canonicalize(destination).map_err(|e| io_fault(&e))?;
         if !directory.is_dir() {
             return Err(Fault::new(500, "io_error"));
         }
@@ -787,12 +816,16 @@ impl Engine {
         let record = &mut inner.records[index];
         record.transfer.state = TransferState::Completed;
         record.changed = Instant::now();
-        Ok(record.transfer.clone())
+        let transfer = record.transfer.clone();
+        Self::sync_upload_batch_locked(&mut inner);
+        Ok(transfer)
     }
     pub fn snapshot(&self) -> Snapshot {
         let mut inner = self.lock();
         self.expire_locked(&mut inner);
+        Self::sync_upload_batch_locked(&mut inner);
         Snapshot {
+            upload_batch: inner.upload_batch.as_ref().map(|b| b.local.clone()),
             session: inner.session.as_ref().map(|s| s.info.clone()),
             receive_enabled: inner.receive,
             peers: inner

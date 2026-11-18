@@ -20,6 +20,13 @@ enum Command {
         transfer_id: String,
         destination: PathBuf,
     },
+    AcceptUploadBatch {
+        batch_id: String,
+        destination: PathBuf,
+    },
+    CancelUploadBatch {
+        batch_id: String,
+    },
     Offer {
         peer_id: String,
         source: PathBuf,
@@ -76,6 +83,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         destination,
                     } => serde_json::to_value(core.accept_upload(&transfer_id, destination)?)
                         .unwrap(),
+                    Command::AcceptUploadBatch {
+                        batch_id,
+                        destination,
+                    } => serde_json::to_value(core.accept_upload_batch(&batch_id, destination)?)
+                        .unwrap(),
+                    Command::CancelUploadBatch { batch_id } => {
+                        serde_json::to_value(core.cancel_upload_batch(&batch_id)?).unwrap()
+                    }
                     Command::Offer { peer_id, source } => {
                         serde_json::to_value(core.offer_download(&peer_id, source)?).unwrap()
                     }

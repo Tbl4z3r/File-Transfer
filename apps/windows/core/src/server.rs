@@ -111,6 +111,7 @@ pub(crate) async fn start(
     inner.closing = None;
     inner.receive = false;
     inner.records.clear();
+    inner.upload_batch = None;
     inner.window = None;
     drop(inner);
     let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -269,6 +270,11 @@ async fn route(engine: Arc<Engine>, request: Request<Body>) -> Result<Response<B
     } else if path == "/v1/transfers" {
         expected_method = Method::POST;
         "create"
+    } else if path == "/v1/upload-batches" {
+        expected_method = Method::POST;
+        "batch_create"
+    } else if path.starts_with("/v1/upload-batches/") {
+        "batch"
     } else if path == "/v1/offers" {
         "offers"
     } else if path.starts_with("/v1/transfers/") {
@@ -276,7 +282,7 @@ async fn route(engine: Arc<Engine>, request: Request<Body>) -> Result<Response<B
     } else {
         return Err(Fault::new(404, "not_found"));
     };
-    if route != "transfer" && method != expected_method {
+    if route != "transfer" && route != "batch" && method != expected_method {
         return Err(Fault::new(405, "method_not_allowed"));
     }
     if route == "pair" {
@@ -289,6 +295,46 @@ async fn route(engine: Arc<Engine>, request: Request<Body>) -> Result<Response<B
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or(""),
     )?;
+    if route == "batch_create" {
+        let data = parse_json::<crate::upload_batch::CreateBatch>(request, engine.timeouts.headers)
+            .await?;
+        return Ok(json_response(
+            201,
+            &engine.create_upload_batch(&peer, data)?,
+        ));
+    }
+    if route == "batch" {
+        let pieces: Vec<_> = path
+            .trim_start_matches("/v1/upload-batches/")
+            .split('/')
+            .collect();
+        if pieces.len() > 2 || !valid_id(pieces[0]) {
+            return Err(Fault::new(404, "not_found"));
+        }
+        let id = pieces[0];
+        let status = engine.upload_batch_status(&peer, id)?;
+        return match pieces.get(1).copied().unwrap_or("") {
+            "" if method == Method::GET => Ok(json_response(200, &status)),
+            "start" if method == Method::POST => {
+                let data =
+                    parse_json::<crate::upload_batch::StartBatch>(request, engine.timeouts.headers)
+                        .await?;
+                Ok(json_response(
+                    200,
+                    &engine.start_upload_batch(&peer, id, data.index)?,
+                ))
+            }
+            "cancel" if method == Method::POST => {
+                parse_json::<Empty>(request, engine.timeouts.headers).await?;
+                Ok(json_response(
+                    200,
+                    &engine.cancel_upload_batch_remote(&peer, id)?,
+                ))
+            }
+            "" | "start" | "cancel" => Err(Fault::new(405, "method_not_allowed")),
+            _ => Err(Fault::new(404, "not_found")),
+        };
+    }
     if route == "create" {
         let request = parse_json::<CreateUpload>(request, engine.timeouts.headers).await?;
         return Ok(json_response(201, &engine.create_upload(&peer, request)?));

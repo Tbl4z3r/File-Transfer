@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use file_transfer_core::{
-    Engine, Snapshot,
+    BatchStatus, Engine, Snapshot,
     model::{Descriptor, Transfer},
 };
 use std::{net::Ipv4Addr, path::PathBuf, sync::Arc};
@@ -49,6 +49,20 @@ fn accept_upload(
     destination: PathBuf,
 ) -> Result<Transfer, String> {
     core.accept_upload(&transfer_id, destination)
+        .map_err(|e| e.code.to_owned())
+}
+#[tauri::command]
+fn accept_upload_batch(
+    core: Core<'_>,
+    batch_id: String,
+    destination: PathBuf,
+) -> Result<BatchStatus, String> {
+    core.accept_upload_batch(&batch_id, destination)
+        .map_err(|e| e.code.to_owned())
+}
+#[tauri::command]
+fn cancel_upload_batch(core: Core<'_>, batch_id: String) -> Result<BatchStatus, String> {
+    core.cancel_upload_batch(&batch_id)
         .map_err(|e| e.code.to_owned())
 }
 #[tauri::command]
@@ -113,6 +127,8 @@ fn main() {
             snapshot,
             revoke_peer,
             accept_upload,
+            accept_upload_batch,
+            cancel_upload_batch,
             offer_download,
             cancel_transfer,
             choose_sources,
