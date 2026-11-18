@@ -12,13 +12,12 @@ type Core<'a> = State<'a, Arc<Engine>>;
 async fn start_session(
     core: Core<'_>,
     bind_ipv4: String,
-    port: u16,
 ) -> Result<file_transfer_core::SessionInfo, String> {
     let bind = bind_ipv4
         .parse::<Ipv4Addr>()
         .map_err(|_| "invalid_request".to_owned())?;
     core.inner()
-        .start_session(bind, port)
+        .start_session_auto(bind)
         .await
         .map_err(|e| e.code.to_owned())
 }
@@ -53,8 +52,13 @@ fn accept_upload(
         .map_err(|e| e.code.to_owned())
 }
 #[tauri::command]
-fn offer_download(core: Core<'_>, peer_id: String, source: PathBuf) -> Result<Transfer, String> {
-    core.offer_download(&peer_id, source)
+fn offer_download(
+    core: Core<'_>,
+    peer_id: String,
+    source: PathBuf,
+    session_id: String,
+) -> Result<Transfer, String> {
+    core.offer_download_in_session(&peer_id, source, &session_id)
         .map_err(|e| e.code.to_owned())
 }
 #[tauri::command]
@@ -62,12 +66,17 @@ fn cancel_transfer(core: Core<'_>, transfer_id: String) -> Result<Transfer, Stri
     core.cancel(&transfer_id).map_err(|e| e.code.to_owned())
 }
 #[tauri::command]
-async fn choose_source(app: tauri::AppHandle) -> Result<Option<PathBuf>, String> {
+async fn choose_sources(app: tauri::AppHandle) -> Result<Option<Vec<PathBuf>>, String> {
     app.dialog()
         .file()
-        .set_title("Elige el archivo que quieres enviar")
-        .blocking_pick_file()
-        .map(|p| p.into_path().map_err(|_| "io_error".to_owned()))
+        .set_title("Elige los archivos que quieres enviar")
+        .blocking_pick_files()
+        .map(|paths| {
+            paths
+                .into_iter()
+                .map(|p| p.into_path().map_err(|_| "io_error".to_owned()))
+                .collect()
+        })
         .transpose()
 }
 #[tauri::command]
@@ -106,7 +115,7 @@ fn main() {
             accept_upload,
             offer_download,
             cancel_transfer,
-            choose_source,
+            choose_sources,
             choose_destination
         ])
         .run(tauri::generate_context!())

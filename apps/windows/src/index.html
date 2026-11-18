@@ -139,14 +139,6 @@
                 required
                 inputmode="decimal"
                 autocomplete="off" /></label
-            ><label class="port"
-              >Puerto<input
-                id="port"
-                type="number"
-                min="1024"
-                max="65535"
-                value="51337"
-                required /></label
             ><button id="start-session" class="primary" type="submit">
               Iniciar sesión
             </button>
@@ -158,6 +150,10 @@
         </section>
         <section class="current">
           <h2>Transferencia actual</h2>
+          <div id="batch-panel" class="panel hidden">
+            <p id="batch-status" role="status" aria-live="polite"></p>
+            <button id="cancel-batch" type="button">Cancelar lote</button>
+          </div>
           <div id="current-transfer" class="transfer-list">
             <div class="panel empty-state">
               <p>Sin transferencias en curso.</p>
@@ -173,7 +169,7 @@
         <section class="actions" aria-label="Enviar y recibir">
           <button id="send-file" class="primary" type="button" disabled>
             <svg class="icon" aria-hidden="true"><use href="#icon-up" /></svg
-            >Enviar archivo</button
+            >Enviar archivos</button
           ><button id="receive" type="button" aria-pressed="false" disabled>
             <svg class="icon" aria-hidden="true"><use href="#icon-down" /></svg
             ><span id="receive-label">Recibir</span>
@@ -260,6 +256,7 @@
       <p class="dialog-notice hidden" role="status" aria-live="polite"></p>
       <h3>Conexión del PC</h3>
       <p id="session-address">Sesión cerrada.</p>
+      <p>El puerto se elige automáticamente al iniciar. Si cambia, actualiza la conexión del móvil con el QR o los datos manuales.</p>
       <p>
         La sesión permanece abierta hasta que la cierres. Cerrar cancela las
         transferencias pendientes y elimina sus parciales.
