@@ -113,10 +113,10 @@ private fun SectionTitle(text: String) {
 @Composable
 internal fun EsencialScreen(
     pairedName: String?, pairedHost: String?, destination: String, busy: Boolean, busyLabel: String, cancellable: Boolean, message: String,
-    transfer: TransferPresentation?, sendQueue: SendQueueProgress?, offer: Transfer?, activity: List<TransferPresentation>,
+    transfer: TransferPresentation?, sendQueue: SendQueueProgress?, offer: Transfer?, batchOffer: DownloadOfferBatch?, activity: List<TransferPresentation>,
     hasPending: Boolean, hasDiagnostic: Boolean, canOpenReceived: Boolean,
     onSettings: () -> Unit, onScan: () -> Unit, onFolder: () -> Unit,
-    onSend: () -> Unit, onReceive: () -> Unit, onAccept: () -> Unit, onDecline: () -> Unit,
+    onSend: () -> Unit, onReceive: () -> Unit, onAccept: () -> Unit, onDetail: () -> Unit, onDecline: () -> Unit,
     onCancel: () -> Unit, onRetry: () -> Unit, onDismissPending: () -> Unit, onDiagnostic: () -> Unit,
     onActivity: () -> Unit, onOpenReceived: () -> Unit,
 ) {
@@ -146,8 +146,8 @@ internal fun EsencialScreen(
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    ActionTile("Enviar archivos", "send", true, !busy && offer == null && !hasPending, Modifier.weight(1f), onSend)
-                    ActionTile("Recibir archivo", "receive", false, !busy && offer == null && !hasPending, Modifier.weight(1f), onReceive)
+                    ActionTile("Enviar archivos", "send", true, !busy && offer == null && batchOffer == null && !hasPending, Modifier.weight(1f), onSend)
+                    ActionTile("Bandeja del PC", "receive", false, !busy && offer == null && batchOffer == null && !hasPending, Modifier.weight(1f), onReceive)
                 }
             }
             Surface(onClick = onFolder, enabled = !busy, color = Color.Transparent, shape = RoundedCornerShape(12.dp)) {
@@ -173,12 +173,23 @@ internal fun EsencialScreen(
                                     sendQueue.current > 0 -> "Lote detenido · archivo ${sendQueue.current} de ${sendQueue.total}"
                                     else -> "Lote detenido · ${sendQueue.total} archivos"
                                 }
-                                Text("$status · ${sendQueue.pending} pendientes sin enviar", style = MaterialTheme.typography.bodySmall,
+                                Text("$status · ${sendQueue.pending} pendientes", style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                             }
                             when {
+                                batchOffer != null -> {
+                                    Column(Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
+                                        FileRow("${batchOffer.files.size} archivos del PC", "${formatBytes(batchOffer.files.sumOf { it.size })} · Pendiente de tu aceptación")
+                                    }
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        OutlinedButton(onClick = onDecline, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Rechazar") }
+                                        Button(onClick = onDetail, enabled = !busy && !hasPending, modifier = Modifier.weight(1f)) { Text("Detalle") }
+                                    }
+                                }
                                 offer != null -> {
-                                    FileRow(offer.name, "El PC quiere enviarte ${formatBytes(offer.size)}")
+                                    Column(Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
+                                        FileRow(offer.name, "El PC quiere enviarte ${formatBytes(offer.size)}")
+                                    }
                                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         OutlinedButton(onClick = onDecline, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Rechazar") }
                                         Button(onClick = onAccept, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Aceptar") }
@@ -212,7 +223,7 @@ internal fun EsencialScreen(
                 LinearProgressIndicator(Modifier.fillMaxWidth())
             }
             if (hasDiagnostic) TextButton(onClick = onDiagnostic) { Text("Copiar diagnóstico") }
-            if (pairedHost != null) {
+            if (pairedHost != null || activity.isNotEmpty() || canOpenReceived) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         SectionTitle("Esta sesión")
