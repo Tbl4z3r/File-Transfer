@@ -2,7 +2,7 @@
 
 Aplicación personal para transferir archivos entre Windows y Android por la red local, con TLS, emparejamiento verificable y sin cuentas ni servicios externos para transferir.
 
-**Estado: versión de desarrollo en `prueba`.** Incluye conexión por QR o entrada manual, un archivo por transferencia en ambos sentidos, autorización explícita, progreso, cancelación, revocación y verificación SHA-256. Android permite elegir una carpeta de recepción y copiar diagnósticos de errores. El núcleo y el cliente Kotlin se han probado juntos mediante TLS real en Linux/JVM. Esto todavía no acredita funcionamiento en Windows y en el J4+ del usuario ni constituye una distribución estable.
+**Versión de desarrollo en `prueba`.** Esencial en Android concentra las acciones, la carpeta y el estado en una pantalla. Enfoque en Windows muestra la transferencia y los dispositivos junto a una barra de accesos. Ambas interfaces comparten una paleta azul con tema claro y oscuro. La aplicación transfiere un archivo por operación en ambos sentidos con autorización explícita y verificación SHA-256. El usuario comprobó el QR y las transferencias en Redmi Note 14 5G y Galaxy J4+ con las versiones previas. [Registro de prueba física](docs/reviews/manual-redmi-j4-2026-11-17.md).
 
 ## Ramas
 
@@ -29,6 +29,6 @@ CI comprueba el protocolo, núcleo Linux, interfaz y shell Windows, APK/lint/pru
 
 ## Límites actuales
 
-Un archivo por operación; reintentar desde cero tras un corte. Mantener Android abierto durante la transferencia. Pendientes mDNS, lotes, recuperación, distribución final y pruebas físicas de Windows 10 22H2/Windows 11 y Android 9/J4+. No hay telemetría ni Google Play Services.
+Mantén Android abierto durante la transferencia y reintenta desde cero tras un corte. Pendientes las pruebas físicas de esta interfaz, el descubrimiento mDNS, los lotes, la reanudación y la distribución estable.
 
 [Continuidad](docs/CONTINUITY.md) · [Tablero](docs/tasks/BOARD.md) · [Alcance original](docs/project-brief.es.md)

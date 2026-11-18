@@ -42,7 +42,7 @@ jobs:
       - run: cargo +1.100.0 test --manifest-path apps/windows/core/Cargo.toml --locked
       - run: npm ci
         working-directory: apps/windows
-      - run: npm run test:qr
+      - run: npm run test:ui
         working-directory: apps/windows
       - run: npm run tauri -- build --no-bundle
         working-directory: apps/windows
