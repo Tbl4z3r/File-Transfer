@@ -6,7 +6,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
@@ -52,6 +51,7 @@ class MainActivity : ComponentActivity() {
             var diagnostic by remember { mutableStateOf<String?>(null) }
             var offer by remember { mutableStateOf<Transfer?>(null) }
             var transfer by remember { mutableStateOf<TransferPresentation?>(null) }
+            var sendQueue by remember { mutableStateOf<SendQueueProgress?>(null) }
             var activity by remember { mutableStateOf(listOf<TransferPresentation>()) }
             var dialog by remember { mutableStateOf<String?>(null) }
 
@@ -160,59 +160,115 @@ class MainActivity : ComponentActivity() {
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
                         Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION))
             }
-            val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-                if (uri != null && !busy && pair != null) {
+            val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+                if (uris.isNotEmpty() && !busy && pair != null && pending == null && offer == null) {
                     transfer = null
+                    sendQueue = null
                     post("send", transferOperation = true) {
-                        val cursor = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null) ?: error("No se pudo leer la selección")
-                        val (name, size) = cursor.use { require(it.moveToFirst()); it.getString(0) to it.getLong(1).also { _ -> require(!it.isNull(1)) } }
-                        require(Validation.name(name)) { "Nombre no válido para Windows" }
-                        Validation.size(size.toString())
-                        runOnUiThread { transfer = TransferPresentation(name, size, "upload", phase = "Solicitando envío al PC") }
-                        check(!cancelled) { "Cancelada" }
-                        val c = connected()
-                        val t = c.createUpload(name, size)
-                        transferId = t.id
-                        runOnUiThread { transfer = transfer?.copy(id = t.id) }
-                        try {
-                            phase("Espera la aceptación en el PC")
-                            var state = t
-                            while (state.state == "awaiting_acceptance") {
-                                check(!cancelled) { "Cancelada" }; Thread.sleep(700); state = c.status(t.id)
+                        SendQueue(uris.distinct()).run({ cancelled }, { state ->
+                            runOnUiThread { sendQueue = state }
+                        }) { uri ->
+                            // Clear the previous item before querying a provider that may fail.
+                            runOnUiThread { transfer = null }
+                            transferId = null
+                            progressClock.set(0L)
+                            operationStage = "send"
+                            check(!cancelled) { "Cancelada" }
+                            val cursor = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
+                                ?: throw SendSelectionException("El proveedor no permite leer este archivo. Vuelve a seleccionarlo desde Archivos.")
+                            val (name, size) = cursor.use {
+                                val nameColumn = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                                val sizeColumn = it.getColumnIndex(OpenableColumns.SIZE)
+                                if (!it.moveToFirst() || nameColumn < 0 || sizeColumn < 0 || it.isNull(nameColumn) || it.isNull(sizeColumn))
+                                    throw SendSelectionException("El proveedor no ofrece nombre y tamaño de este archivo. Guárdalo localmente y vuelve a seleccionarlo.")
+                                it.getString(nameColumn) to it.getLong(sizeColumn)
                             }
+                            if (!Validation.name(name)) throw SendSelectionException("Este nombre de archivo no es válido para Windows. Cámbialo y vuelve a seleccionarlo.")
+                            try { Validation.size(size.toString()) }
+                            catch (_: IllegalArgumentException) { throw SendSelectionException("El tamaño de este archivo no es válido o supera 1 TiB.") }
+                            // Each callback owns a snapshot; it cannot finish or update the next item.
+                            var item = TransferPresentation(name, size, "upload", phase = "Solicitando envío al PC")
+                            fun show() { val snapshot = item; runOnUiThread { transfer = snapshot } }
+                            fun itemPhase(label: String) { item = item.copy(phase = label); show() }
+                            fun itemFinish(result: String) {
+                                val entry = item.copy(result = result)
+                                item = entry
+                                runOnUiThread {
+                                    transfer = entry
+                                    activity = (activity.filterNot { old -> entry.id != null && old.id == entry.id } + entry).takeLast(32)
+                                }
+                            }
+                            show()
                             check(!cancelled) { "Cancelada" }
-                            require(state.state == "ready") { "El PC no aceptó la transferencia" }
-                            phase("Enviando al PC")
-                            val (remote, hash) = requireNotNull(contentResolver.openInputStream(uri)).use { c.uploadContent(t.id, it, size) { n -> report(n, size) } }
-                            phase("Verificando integridad")
+                            val c = connected()
                             check(!cancelled) { "Cancelada" }
-                            require(remote.state == "awaiting_verification" && remote.sha256 == hash) { "La integridad no coincide" }
-                            phase("Confirmando con el PC")
-                            try { require(c.complete(t.id, hash).state == "completed") }
-                            catch (error: Exception) {
-                                val remoteState = runCatching { c.status(t.id) }.getOrNull()
-                                val details = TransferDiagnostics.describe("confirm", error)
-                                when {
-                                    remoteState?.state == "completed" && remoteState.sha256 == hash -> finish("Enviado y verificado")
-                                    remoteState?.state in setOf("cancelled", "failed") -> {
-                                        finish(if (remoteState?.state == "cancelled") "Cancelada" else "No completada")
-                                        runOnUiThread { diagnostic = details; message = "El PC terminó la operación sin confirmar el archivo. Vuelve a enviarlo." }
-                                    }
-                                    else -> {
-                                        finish("Confirmación pendiente")
-                                        runOnUiThread { diagnostic = details; pending = t.id to hash; message = "Datos enviados; falta confirmar que el PC guardó el archivo." }
+                            val t = c.createUpload(name, size)
+                            transferId = t.id
+                            item = item.copy(id = t.id)
+                            show()
+                            try {
+                                itemPhase("Espera la aceptación en el PC")
+                                var state = t
+                                while (state.state == "awaiting_acceptance") {
+                                    check(!cancelled) { "Cancelada" }; Thread.sleep(700)
+                                    check(!cancelled) { "Cancelada" }; state = c.status(t.id)
+                                }
+                                check(!cancelled) { "Cancelada" }
+                                if (state.state != "ready") {
+                                    itemFinish(if (state.state == "cancelled") "Rechazada o cancelada en el PC" else "No completada")
+                                    runOnUiThread { message = "El PC no aceptó el archivo. El lote se ha detenido." }
+                                    return@run false
+                                }
+                                itemPhase("Enviando al PC")
+                                val inputStream = contentResolver.openInputStream(uri)
+                                    ?: throw SendSelectionException("No se pudo abrir este archivo. Vuelve a seleccionarlo desde Archivos.")
+                                val (remote, hash) = inputStream.use { input ->
+                                    c.uploadContent(t.id, input, size) { n ->
+                                        check(!cancelled) { "Cancelada" }
+                                        val now = System.nanoTime()
+                                        if (n == size || now - progressClock.get() >= 100_000_000L) {
+                                            progressClock.set(now); item = item.copy(bytes = n); show()
+                                        }
                                     }
                                 }
-                                return@post
-                            }
-                            finish("Enviado y verificado")
-                        } catch (e: Exception) { runCatching { c.cancel(t.id) }; throw e }
+                                itemPhase("Verificando integridad")
+                                check(!cancelled) { "Cancelada" }
+                                require(remote.state == "awaiting_verification" && remote.sha256 == hash) { "La integridad no coincide" }
+                                itemPhase("Confirmando con el PC")
+                                try {
+                                    val completed = c.complete(t.id, hash)
+                                    require(completed.state == "completed" && completed.sha256 == hash)
+                                } catch (error: Exception) {
+                                    val remoteState = runCatching { c.status(t.id) }.getOrNull()
+                                    val details = TransferDiagnostics.describe("confirm", error)
+                                    when {
+                                        remoteState?.state == "completed" && remoteState.sha256 == hash -> {
+                                            itemFinish("Enviado y verificado")
+                                            return@run true
+                                        }
+                                        remoteState?.state in setOf("cancelled", "failed") -> {
+                                            itemFinish(if (remoteState?.state == "cancelled") "Cancelada" else "No completada")
+                                            runOnUiThread { diagnostic = details; message = "El PC terminó la operación sin confirmar el archivo. El lote se ha detenido." }
+                                        }
+                                        else -> {
+                                            itemFinish("Confirmación pendiente")
+                                            runOnUiThread { diagnostic = details; pending = t.id to hash; message = "Datos enviados; falta confirmar que el PC guardó el archivo. El lote se ha detenido." }
+                                        }
+                                    }
+                                    return@run false
+                                }
+                                itemFinish("Enviado y verificado")
+                                true
+                            } catch (e: Exception) { runCatching { c.cancel(t.id) }; throw e }
+                            finally { transferId = null }
+                        }
                     }
                 }
             }
             fun receive() {
                 val selected = offer ?: return
                 offer = null
+                sendQueue = null
                 transfer = TransferPresentation(selected.name, selected.size, "download", phase = "Preparando recepción", id = selected.id)
                 post("receive", transferOperation = true) {
                     check(!cancelled) { "Cancelada" }
@@ -279,7 +335,7 @@ class MainActivity : ComponentActivity() {
                         else -> "Preparando transferencia…"
                     },
                     cancellable = busy && operationStage != "choose_folder",
-                    message = message, transfer = transfer, offer = offer, activity = activity,
+                    message = message, transfer = transfer, sendQueue = sendQueue, offer = offer, activity = activity,
                     hasPending = pending != null, hasDiagnostic = diagnostic != null, canOpenReceived = lastReceived != null,
                     onSettings = { dialog = "settings" },
                     onScan = {
@@ -288,7 +344,7 @@ class MainActivity : ComponentActivity() {
                         else cameraPermission.launch(Manifest.permission.CAMERA)
                     },
                     onFolder = { dialog = "folder" }, onSend = { picker.launch(arrayOf("*/*")) },
-                    onReceive = { transfer = null; post("offers") { val offers = connected().offers(); runOnUiThread { offer = offers.firstOrNull(); if (offer == null) message = "No hay archivos ofrecidos por el PC. Elige un archivo allí y vuelve a pulsar Recibir." } } },
+                    onReceive = { transfer = null; sendQueue = null; post("offers") { val offers = connected().offers(); runOnUiThread { offer = offers.firstOrNull(); if (offer == null) message = "No hay archivos ofrecidos por el PC. Elige un archivo allí y vuelve a pulsar Recibir." } } },
                     onAccept = { receive() }, onDecline = {
                         val selected = offer
                         if (selected != null) {
@@ -378,7 +434,7 @@ class MainActivity : ComponentActivity() {
                         }) { Text("Cerrar confirmación") }
                     }, dismissButton = { TextButton(onClick = { dialog = null }) { Text("Volver") } })
                     "forget" -> AlertDialog(containerColor = MaterialTheme.colorScheme.surface, onDismissRequest = { dialog = null }, title = { Text("¿Olvidar este PC?") }, text = { Text("Se eliminará la conexión de este teléfono. También puedes revocar el dispositivo en el PC.") }, confirmButton = {
-                        TextButton(onClick = { store.forget(); pair = null; pending = null; offer = null; transfer = null; dialog = null; message = "Dispositivo olvidado en este teléfono." }) { Text("Olvidar") }
+                        TextButton(onClick = { store.forget(); pair = null; pending = null; offer = null; transfer = null; sendQueue = null; dialog = null; message = "Dispositivo olvidado en este teléfono." }) { Text("Olvidar") }
                     }, dismissButton = { TextButton(onClick = { dialog = "settings" }) { Text("Volver") } })
                 }
             }

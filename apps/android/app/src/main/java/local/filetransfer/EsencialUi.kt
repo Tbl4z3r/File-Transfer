@@ -113,7 +113,7 @@ private fun SectionTitle(text: String) {
 @Composable
 internal fun EsencialScreen(
     pairedName: String?, pairedHost: String?, destination: String, busy: Boolean, busyLabel: String, cancellable: Boolean, message: String,
-    transfer: TransferPresentation?, offer: Transfer?, activity: List<TransferPresentation>,
+    transfer: TransferPresentation?, sendQueue: SendQueueProgress?, offer: Transfer?, activity: List<TransferPresentation>,
     hasPending: Boolean, hasDiagnostic: Boolean, canOpenReceived: Boolean,
     onSettings: () -> Unit, onScan: () -> Unit, onFolder: () -> Unit,
     onSend: () -> Unit, onReceive: () -> Unit, onAccept: () -> Unit, onDecline: () -> Unit,
@@ -146,7 +146,7 @@ internal fun EsencialScreen(
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    ActionTile("Enviar archivo", "send", true, !busy && offer == null && !hasPending, Modifier.weight(1f), onSend)
+                    ActionTile("Enviar archivos", "send", true, !busy && offer == null && !hasPending, Modifier.weight(1f), onSend)
                     ActionTile("Recibir archivo", "receive", false, !busy && offer == null && !hasPending, Modifier.weight(1f), onReceive)
                 }
             }
@@ -165,6 +165,16 @@ internal fun EsencialScreen(
                     SectionTitle("Transferencia")
                     Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surface) {
                         Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            if (sendQueue != null) {
+                                val status = when {
+                                    sendQueue.completed == sendQueue.total -> "Lote completado"
+                                    sendQueue.running -> "Archivo ${sendQueue.current} de ${sendQueue.total}"
+                                    sendQueue.current > 0 -> "Lote detenido · archivo ${sendQueue.current} de ${sendQueue.total}"
+                                    else -> "Lote detenido · ${sendQueue.total} archivos"
+                                }
+                                Text("$status · ${sendQueue.pending} pendientes sin enviar", style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                            }
                             when {
                                 offer != null -> {
                                     FileRow(offer.name, "El PC quiere enviarte ${formatBytes(offer.size)}")
@@ -186,7 +196,7 @@ internal fun EsencialScreen(
                                 else -> Text("Sin transferencias en curso.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             if (busy && transfer?.result != null) Text(busyLabel, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            if (cancellable) TextButton(onClick = onCancel) { Text("Cancelar") }
+                            if (cancellable) TextButton(onClick = onCancel) { Text(if (sendQueue?.running == true && sendQueue.total > 1) "Cancelar lote" else "Cancelar") }
                             if (hasPending) {
                                 Button(onClick = onRetry, enabled = !busy) { Text("Reintentar confirmación") }
                                 TextButton(onClick = onDismissPending, enabled = !busy) { Text("Cerrar confirmación pendiente") }
