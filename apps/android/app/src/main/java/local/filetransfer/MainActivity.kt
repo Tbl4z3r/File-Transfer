@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.provider.OpenableColumns
+import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -25,39 +26,115 @@ import java.io.File
 import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
-    private val worker = Executors.newSingleThreadExecutor()
-    @Volatile private var client: ProtocolClient? = null
-    @Volatile private var transferId: String? = null
-    @Volatile private var cancelled = false
-    @Volatile private var operationStage = "idle"
-    @Volatile private var pendingUploadBatchId: String? = null
+    private class Session {
+        val worker = Executors.newSingleThreadExecutor()
+        val poller = Executors.newSingleThreadScheduledExecutor()
+        @Volatile var client: ProtocolClient? = null
+        @Volatile var transferId: String? = null
+        @Volatile var cancelled = false
+        @Volatile var operationStage = "idle"
+        @Volatile var pendingUploadBatchId: String? = null
+        @Volatile var generation = 0L
+        val operationGeneration = ThreadLocal<Long>()
+        val pair = mutableStateOf<Pairing?>(null)
+        val message = mutableStateOf("")
+        val destination = mutableStateOf("")
+        val busy = mutableStateOf(false)
+        val pending = mutableStateOf<Pair<String, String>?>(null)
+        val lastReceived = mutableStateOf<ReceivedDocument?>(null)
+        val diagnostic = mutableStateOf<String?>(null)
+        val offer = mutableStateOf<Transfer?>(null)
+        val batchOffer = mutableStateOf<DownloadOfferBatch?>(null)
+        val transfer = mutableStateOf<TransferPresentation?>(null)
+        val sendQueue = mutableStateOf<SendQueueProgress?>(null)
+        val activity = mutableStateOf(listOf<TransferPresentation>())
+    }
+    private lateinit var session: Session
+    private val worker get() = session.worker
+    private var client: ProtocolClient?
+        get() = session.client
+        set(value) { session.client = value }
+    private var transferId: String?
+        get() = session.transferId
+        set(value) { session.transferId = value }
+    private var cancelled: Boolean
+        get() = session.cancelled || session.operationGeneration.get()?.let { it != session.generation } == true
+        set(value) { session.cancelled = value }
+    private var operationStage: String
+        get() = session.operationStage
+        set(value) { session.operationStage = value }
+    private var pendingUploadBatchId: String?
+        get() = session.pendingUploadBatchId
+        set(value) { session.pendingUploadBatchId = value }
+
+    private fun sameGeneration() = session.operationGeneration.get()?.let { it == session.generation } ?: true
+
+    private fun updateUi(action: () -> Unit) {
+        val generation = session.operationGeneration.get() ?: session.generation
+        runOnUiThread { if (generation == session.generation) action() }
+    }
+
+    private fun bestEffortDisconnect(p: Pairing) {
+        Thread { runCatching { ProtocolClient(p.host, p.port, p.pin, p.deviceId, p.credential, shortTimeout = true).disconnect() } }.start()
+    }
+
+    private fun disconnectSession() {
+        val p = session.pair.value
+        session.generation++
+        session.pair.value = null
+        session.cancelled = true
+        session.busy.value = false
+        session.client?.interrupt()
+        session.client = null
+        session.transferId = null
+        session.offer.value = null
+        session.batchOffer.value = null
+        session.pending.value = null
+        session.pendingUploadBatchId = null
+        session.transfer.value?.takeIf { it.result == null }?.let { current ->
+            val result = if (current.direction == "download" && current.phase == "Confirmando con el PC")
+                "Guardado y verificado; sesión remota terminada" else "Interrumpida; sesión terminada"
+            val entry = current.copy(result = result)
+            session.transfer.value = entry
+            session.activity.value = (session.activity.value.filterNot { entry.id != null && it.id == entry.id } + entry).takeLast(32)
+        }
+        session.sendQueue.value = session.sendQueue.value?.copy(running = false)
+        if (p != null) bestEffortDisconnect(p)
+    }
+
+    @Deprecated("Retains in-memory session only")
+    override fun onRetainCustomNonConfigurationInstance(): Any = session
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        session = (lastCustomNonConfigurationInstance as? Session) ?: Session()
         enableEdgeToEdge()
-        val receiveStorage = ReceiveStorage(this)
-        File(filesDir, "partial").apply { mkdirs(); listFiles()?.forEach { it.delete() } }
-        val store = PairStore(this)
+        val receiveStorage = ReceiveStorage(applicationContext)
+        if (session.destination.value.isEmpty()) session.destination.value = receiveStorage.destinationLabel()
+        File(filesDir, "partial").apply { mkdirs(); if (lastCustomNonConfigurationInstance == null) listFiles()?.forEach { it.delete() } }
+        PairStore(this) // Discard credentials left by older versions; never restore pairing.
         setContent {
-            var pair by remember { mutableStateOf(runCatching { store.load() }.getOrNull()) }
+            var pair by remember { session.pair }
             var descriptor by remember { mutableStateOf("") }
             var deviceName by rememberSaveable { mutableStateOf("Android personal") }
-            var message by remember { mutableStateOf("") }
-            var busy by remember { mutableStateOf(false) }
+            var message by remember { session.message }
+            var busy by remember { session.busy }
             var address by remember { mutableStateOf(pair?.host ?: "") }
             var portText by remember { mutableStateOf(pair?.port?.toString() ?: "") }
-            var pending by remember { mutableStateOf<Pair<String, String>?>(null) }
-            var lastReceived by remember { mutableStateOf<ReceivedDocument?>(null) }
-            var destination by remember { mutableStateOf(receiveStorage.destinationLabel()) }
-            var diagnostic by remember { mutableStateOf<String?>(null) }
-            var offer by remember { mutableStateOf<Transfer?>(null) }
-            var transfer by remember { mutableStateOf<TransferPresentation?>(null) }
-            var sendQueue by remember { mutableStateOf<SendQueueProgress?>(null) }
-            var activity by remember { mutableStateOf(listOf<TransferPresentation>()) }
+            var pending by remember { session.pending }
+            var lastReceived by remember { session.lastReceived }
+            var destination by remember { session.destination }
+            var diagnostic by remember { session.diagnostic }
+            var offer by remember { session.offer }
+            var transfer by remember { session.transfer }
+            var sendQueue by remember { session.sendQueue }
+            var activity by remember { session.activity }
+            var batchOffer by remember { session.batchOffer }
             var dialog by remember { mutableStateOf<String?>(null) }
+            LaunchedEffect(pair) { pair?.let { address = it.host; portText = it.port.toString() } }
 
             fun finish(result: String) {
-                runOnUiThread {
+                updateUi {
                     transfer?.let {
                         val entry = it.copy(result = result)
                         transfer = entry
@@ -66,21 +143,25 @@ class MainActivity : ComponentActivity() {
                 }
             }
             fun post(stage: String = "operation", transferOperation: Boolean = false, block: () -> Unit) {
+                val operationGeneration = session.generation
                 cancelled = false
                 busy = true
                 diagnostic = null
                 message = ""
                 operationStage = stage
                 worker.execute {
+                    if (operationGeneration != session.generation) return@execute
+                    session.operationGeneration.set(operationGeneration)
                     try { block() }
                     catch (error: Exception) {
                         val details = TransferDiagnostics.describe(operationStage, error)
                         val explanation = TransferDiagnostics.userMessage(operationStage, error, cancelled)
                         if (transferOperation) finish(if (cancelled) "Cancelada" else "No completada")
-                        runOnUiThread { diagnostic = details; message = explanation }
+                        updateUi { if (session.generation == operationGeneration) { diagnostic = details; message = explanation } }
                     } finally {
                         transferId = null
-                        runOnUiThread { busy = false }
+                        updateUi { busy = false }
+                        session.operationGeneration.remove()
                     }
                 }
             }
@@ -93,10 +174,10 @@ class MainActivity : ComponentActivity() {
                 val now = System.nanoTime()
                 if (n == total || now - progressClock.get() >= 100_000_000L) {
                     progressClock.set(now)
-                    runOnUiThread { transfer = transfer?.copy(bytes = n) }
+                    updateUi { transfer = transfer?.copy(bytes = n) }
                 }
             }
-            fun phase(label: String) { runOnUiThread { transfer = transfer?.copy(phase = label) } }
+            fun phase(label: String) { updateUi { transfer = transfer?.copy(phase = label) } }
             fun cancel() {
                 cancelled = true
                 val id = transferId
@@ -113,10 +194,10 @@ class MainActivity : ComponentActivity() {
                 post("pair") {
                     val p = try {
                         withValidatedDescriptor(raw) { d ->
-                            ProtocolClient(d.host, d.port, d.pin, store.deviceId()).also { client = it }.pair(d, name)
+                            ProtocolClient(d.host, d.port, d.pin, java.util.UUID.randomUUID().toString()).also { client = it }.pair(d, name)
                         }
                     } catch (_: InvalidDescriptor) {
-                        runOnUiThread { message = "El código o descriptor no es válido. Genera otro QR en el PC o usa el JSON manual." }
+                        updateUi { message = "El código o descriptor no es válido. Genera otro QR en el PC o usa el JSON manual." }
                         return@post
                     } catch (error: ProtocolException) {
                         val explanation = when (error.code) {
@@ -124,11 +205,14 @@ class MainActivity : ComponentActivity() {
                             "already_paired" -> "Este teléfono ya está emparejado. Revoca el emparejamiento anterior en el PC y genera otro QR."
                             else -> throw error
                         }
-                        runOnUiThread { message = explanation }
+                        updateUi { message = explanation }
                         return@post
                     }
-                    store.save(p)
-                    runOnUiThread { pair = p; address = p.host; portText = p.port.toString(); descriptor = ""; message = "Dispositivo emparejado." }
+                    val pairingGeneration = session.operationGeneration.get() ?: session.generation
+                    runOnUiThread {
+                        if (pairingGeneration != session.generation || cancelled || isFinishing) bestEffortDisconnect(p)
+                        else { pair = p; address = p.host; portText = p.port.toString(); descriptor = ""; message = "Dispositivo emparejado." }
+                    }
                 }
             }
             val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
@@ -152,7 +236,7 @@ class MainActivity : ComponentActivity() {
                 val uri = result.data?.data
                 if (result.resultCode == Activity.RESULT_OK && uri != null) post("choose_folder") {
                     val label = receiveStorage.selectTree(uri, result.data!!.flags)
-                    runOnUiThread { destination = label; message = "Carpeta de recepción actualizada." }
+                    updateUi { destination = label; message = "Carpeta de recepción actualizada." }
                 }
             }
             fun chooseFolder() {
@@ -162,7 +246,7 @@ class MainActivity : ComponentActivity() {
                         Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION))
             }
             val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-                if (uris.isNotEmpty() && !busy && pair != null && pending == null && offer == null) {
+                if (uris.isNotEmpty() && !busy && pair != null && pending == null && offer == null && batchOffer == null) {
                     transfer = null
                     sendQueue = null
                     post("send", transferOperation = true) {
@@ -192,30 +276,30 @@ class MainActivity : ComponentActivity() {
                         var confirmationPending = false
                         var queueState = SendQueueProgress(0, prepared.size, 0, true)
                         try {
-                            runOnUiThread { sendQueue = queueState }
+                            updateUi { sendQueue = queueState }
                             authorization.request({ cancelled }) {
-                                runOnUiThread { message = "Espera la aceptación del lote en el PC." }
+                                updateUi { message = "Espera la aceptación del lote en el PC." }
                             }
-                            runOnUiThread { message = "" }
+                            updateUi { message = "" }
                             SendQueue(prepared.withIndex().toList()).run({ cancelled }, { state ->
                                 queueState = state
-                                runOnUiThread { sendQueue = state }
+                                updateUi { sendQueue = state }
                             }) { (index, source) ->
                                 val (uri, file) = source
                                 val (name, size) = file
-                                runOnUiThread { transfer = null }
+                                updateUi { transfer = null }
                                 transferId = null
                                 progressClock.set(0L)
                                 operationStage = "send"
                                 check(!cancelled) { "Cancelada" }
                                 // Each callback owns a snapshot; it cannot finish or update the next item.
                                 var item = TransferPresentation(name, size, "upload", phase = "Solicitando envío al PC")
-                                fun show() { val snapshot = item; runOnUiThread { transfer = snapshot } }
+                                fun show() { val snapshot = item; updateUi { transfer = snapshot } }
                                 fun itemPhase(label: String) { item = item.copy(phase = label); show() }
                                 fun itemFinish(result: String) {
                                     val entry = item.copy(result = result)
                                     item = entry
-                                    runOnUiThread {
+                                    updateUi {
                                         transfer = entry
                                         activity = (activity.filterNot { old -> entry.id != null && old.id == entry.id } + entry).takeLast(32)
                                     }
@@ -237,7 +321,7 @@ class MainActivity : ComponentActivity() {
                                     check(!cancelled) { "Cancelada" }
                                     if (state.state != "ready") {
                                         itemFinish(if (state.state == "cancelled") "Rechazada o cancelada en el PC" else "No completada")
-                                        runOnUiThread { message = "El PC no aceptó el archivo. El lote se ha detenido." }
+                                        updateUi { message = "El PC no aceptó el archivo. El lote se ha detenido." }
                                         return@run false
                                     }
                                     require(state.id == t.id)
@@ -262,7 +346,7 @@ class MainActivity : ComponentActivity() {
                                         val completed = c.complete(t.id, hash)
                                         require(completed.state == "completed" && completed.sha256 == hash)
                                     } catch (error: Exception) {
-                                        val remoteState = runCatching { c.status(t.id) }.getOrNull()
+                                        val remoteState = if (sameGeneration()) runCatching { c.status(t.id) }.getOrNull() else null
                                         val details = TransferDiagnostics.describe("confirm", error)
                                         when {
                                             remoteState?.state == "completed" && remoteState.sha256 == hash -> {
@@ -271,89 +355,161 @@ class MainActivity : ComponentActivity() {
                                             }
                                             remoteState?.state in setOf("cancelled", "failed") -> {
                                                 itemFinish(if (remoteState?.state == "cancelled") "Cancelada" else "No completada")
-                                                runOnUiThread { diagnostic = details; message = "El PC terminó la operación sin confirmar el archivo. El lote se ha detenido." }
+                                                updateUi { diagnostic = details; message = "El PC terminó la operación sin confirmar el archivo. El lote se ha detenido." }
                                             }
                                             else -> {
                                                 confirmationPending = true
                                                 pendingUploadBatchId = authorization.batchId
                                                 itemFinish("Confirmación pendiente")
-                                                runOnUiThread { diagnostic = details; pending = t.id to hash; message = "Datos enviados; falta confirmar que el PC guardó el archivo. El lote se ha detenido." }
+                                                updateUi { diagnostic = details; pending = t.id to hash; message = "Datos enviados; falta confirmar que el PC guardó el archivo. El lote se ha detenido." }
                                             }
                                         }
                                         return@run false
                                     }
                                     itemFinish("Enviado y verificado")
                                     true
-                                } catch (e: Exception) { if (!verifiedUpload) runCatching { c.cancel(t.id) }; throw e }
+                                } catch (e: Exception) { if (!verifiedUpload && sameGeneration()) runCatching { c.cancel(t.id) }; throw e }
                                 finally { transferId = null }
                             }
                         } finally {
                             val stopped = queueState.copy(running = false)
-                            runOnUiThread { sendQueue = stopped }
-                            if (queueState.completed < queueState.total) authorization.stop(confirmationPending)
+                            updateUi { sendQueue = stopped }
+                            if (queueState.completed < queueState.total && sameGeneration()) authorization.stop(confirmationPending)
                         }
                     }
                 }
             }
-            fun receive() {
-                val selected = offer ?: return
+            DisposableEffect(pair) {
+                val p = pair
+                val generation = session.generation
+                val disposed = java.util.concurrent.atomic.AtomicBoolean(false)
+                var losses = 0
+                val pollClient = p?.let { ProtocolClient(it.host, it.port, it.pin, it.deviceId, it.credential, shortTimeout = true) }
+                val task = pollClient?.let { c -> session.poller.scheduleWithFixedDelay({
+                    try {
+                        val inbox = c.inbox()
+                        losses = 0
+                        updateUi {
+                            if (!disposed.get() && session.generation == generation && pair == p && !busy && pending == null) {
+                                if (dialog == "batch_detail" && batchOffer != inbox.batch) dialog = null
+                                offer = inbox.transfer
+                                batchOffer = inbox.batch
+                            }
+                        }
+                    } catch (error: Exception) {
+                        val gone = error is ProtocolException && (error.status == 401 || error.code == "session_closed")
+                        if (gone || ++losses >= 4) updateUi {
+                            if (!disposed.get() && session.generation == generation && pair == p) {
+                                disconnectSession()
+                                dialog = null
+                                message = "La sesión con el PC terminó o se perdió la conexión. Genera otro QR en el PC y escanéalo para reconectar. Los archivos guardados se conservan."
+                            }
+                        }
+                    }
+                }, 0, 2, java.util.concurrent.TimeUnit.SECONDS) }
+                onDispose { disposed.set(true); task?.cancel(false); pollClient?.interrupt() }
+            }
+            BackHandler(enabled = pair != null && dialog == null) { disconnectSession(); this@MainActivity.finish() }
+            fun receiveFile(c: ProtocolClient, selected: Transfer, accept: Boolean): Boolean {
+                transferId = selected.id
+                progressClock.set(0L)
+                updateUi { transfer = TransferPresentation(selected.name, selected.size, "download", phase = "Preparando recepción", id = selected.id) }
+                var temporary: File? = null
+                var published = false
+                try {
+                    receiveStorage.validateDestination()
+                    val temp = File.createTempFile("recv-", ".part", File(filesDir, "partial"))
+                    temporary = temp
+                    check(!cancelled) { "Cancelada" }
+                    val ready = if (accept) c.acceptDownload(selected.id) else selected
+                    require(ready.id == selected.id)
+                    requireReadyDownload(ready, UploadFile(selected.name, selected.size))
+                    check(!cancelled) { "Cancelada" }
+                    operationStage = "download"
+                    phase("Recibiendo del PC")
+                    val hash = temp.outputStream().use { c.downloadContent(selected.id, selected.size, it) { n -> check(!cancelled); report(n, selected.size) } }
+                    operationStage = "verify"
+                    phase("Verificando integridad")
+                    var remote = c.status(selected.id)
+                    val deadline = System.nanoTime() + 30_000_000_000L
+                    while (remote.state == "streaming" && System.nanoTime() < deadline) { check(!cancelled); Thread.sleep(700); remote = c.status(selected.id) }
+                    check(!cancelled) { "Cancelada" }
+                    require(remote.id == selected.id && remote.direction == "download" && remote.name == selected.name && remote.size == selected.size && remote.state == "awaiting_verification" && remote.sha256 == hash) { "La integridad no coincide" }
+                    operationStage = "publish"
+                    phase("Guardando archivo verificado")
+                    val received = receiveStorage.publish(temp, selected.name, selected.size, hash) { cancelled }
+                    published = true
+                    temp.delete()
+                    updateUi { lastReceived = received }
+                    operationStage = "confirm"
+                    phase("Confirmando con el PC")
+                    try { require(c.complete(selected.id, hash).let { it.id == selected.id && it.state == "completed" && it.sha256 == hash }) }
+                    catch (error: Exception) {
+                        val remoteState = if (sameGeneration()) runCatching { c.status(selected.id) }.getOrNull() else null
+                        val details = TransferDiagnostics.describe("confirm", error)
+                        when {
+                            remoteState?.state in setOf("cancelled", "failed") -> {
+                                finish("Guardado y verificado; sesión remota terminada")
+                                updateUi { pending = null; diagnostic = details; message = "El archivo quedó guardado y verificado, pero el PC terminó la operación. El lote se ha detenido; no necesitas descargarlo otra vez." }
+                            }
+                            remoteState?.state == "completed" && remoteState.sha256 == hash -> { finish("Recibido y verificado"); return true }
+                            else -> {
+                                finish("Guardado y verificado; confirmación pendiente")
+                                updateUi { diagnostic = details; pending = selected.id to hash; message = "Archivo íntegro guardado; confirmación remota pendiente. El lote se ha detenido." }
+                            }
+                        }
+                        return false
+                    }
+                    finish("Recibido y verificado")
+                    return true
+                } catch (e: Exception) { if (!published && sameGeneration()) runCatching { c.cancel(selected.id) }; throw e }
+                finally { temporary?.delete(); transferId = null }
+            }
+            fun receive(selected: Transfer) {
+                if (offer != selected || busy || pending != null) return
                 offer = null
                 sendQueue = null
-                transfer = TransferPresentation(selected.name, selected.size, "download", phase = "Preparando recepción", id = selected.id)
+                post("receive", transferOperation = true) { receiveFile(connected(), selected, true) }
+            }
+            fun receiveBatch(selected: DownloadOfferBatch) {
+                if (batchOffer != selected || busy || pending != null) { dialog = null; return }
+                dialog = null
+                batchOffer = null
+                transfer = null
                 post("receive", transferOperation = true) {
-                    check(!cancelled) { "Cancelada" }
                     val c = connected()
-                    transferId = selected.id
-                    var temporary: File? = null
-                    var published = false
+                    var completed = 0
+                    var current = 0
                     try {
                         receiveStorage.validateDestination()
-                        val temp = File.createTempFile("recv-", ".part", File(filesDir, "partial"))
-                        temporary = temp
-                        check(!cancelled) { "Cancelada" }
-                        require(c.acceptDownload(selected.id).state == "ready")
-                        check(!cancelled) { "Cancelada" }
-                        operationStage = "download"
-                        phase("Recibiendo del PC")
-                        val hash = temp.outputStream().use { c.downloadContent(selected.id, selected.size, it) { n -> report(n, selected.size) } }
-                        operationStage = "verify"
-                        phase("Verificando integridad")
-                        var remote = c.status(selected.id)
-                        val deadline = System.nanoTime() + 30_000_000_000L
-                        while (remote.state == "streaming" && System.nanoTime() < deadline) { Thread.sleep(700); remote = c.status(selected.id) }
-                        check(!cancelled) { "Cancelada" }
-                        require(remote.state == "awaiting_verification" && remote.sha256 == hash) { "La integridad no coincide" }
-                        operationStage = "publish"
-                        phase("Guardando archivo verificado")
-                        val received = receiveStorage.publish(temp, selected.name, selected.size, hash) { cancelled }
-                        published = true
-                        temp.delete()
-                        runOnUiThread { lastReceived = received }
-                        operationStage = "confirm"
-                        phase("Confirmando con el PC")
-                        try { require(c.complete(selected.id, hash).state == "completed") }
-                        catch (error: Exception) {
-                            val remoteState = runCatching { c.status(selected.id) }.getOrNull()
-                            val details = TransferDiagnostics.describe("confirm", error)
-                            when {
-                                remoteState?.state in setOf("cancelled", "failed") -> {
-                                    finish("Guardado y verificado; sesión remota terminada")
-                                    runOnUiThread { pending = null; diagnostic = details; message = "El archivo quedó guardado y verificado, pero el PC terminó la operación. No necesitas descargarlo otra vez." }
-                                }
-                                remoteState?.state == "completed" && remoteState.sha256 == hash -> finish("Recibido y verificado")
-                                else -> {
-                                    finish("Guardado y verificado; confirmación pendiente")
-                                    runOnUiThread { diagnostic = details; pending = selected.id to hash; message = "Archivo íntegro guardado; confirmación remota pendiente." }
-                                }
-                            }
-                            return@post
+                        check(!cancelled)
+                        c.acceptDownloadBatch(selected.id)
+                        for ((index, file) in selected.files.withIndex()) {
+                            check(!cancelled)
+                            current = index + 1
+                            val queue = SendQueueProgress(current, selected.files.size, completed, true)
+                            updateUi { sendQueue = queue }
+                            updateUi { transfer = TransferPresentation(file.name, file.size, "download", phase = "Preparando recepción") }
+                            val ready = c.startDownloadBatchFile(selected.id, index)
+                            transferId = ready.id
+                            requireReadyDownload(ready, file)
+                            if (!receiveFile(c, ready, false)) break
+                            completed++
                         }
-                        finish("Recibido y verificado")
-                    } catch (e: Exception) { if (!published) runCatching { c.cancel(selected.id) }; throw e }
-                    finally { temporary?.delete() }
+                        if (completed == selected.files.size) {
+                            try { require(c.downloadBatchStatus(selected.id).state == "completed") } catch (error: Exception) {
+                                updateUi { diagnostic = TransferDiagnostics.describe("confirm", error); message = "Todos los archivos quedaron guardados y verificados; no se pudo confirmar el estado final del lote con el PC." }
+                            }
+                        }
+                    } finally {
+                        if (completed < selected.files.size && sameGeneration()) runCatching { c.cancelDownloadBatch(selected.id) }
+                        val queue = SendQueueProgress(current, selected.files.size, completed, false)
+                        updateUi { sendQueue = queue }
+                    }
                 }
             }
             EsencialTheme {
+                val visibleOffer = offer
                 EsencialScreen(
                     pairedName = pair?.serverName?.takeIf { it.isNotBlank() }, pairedHost = pair?.let { "${it.host}:${it.port}" }, destination = destination, busy = busy,
                     busyLabel = when (operationStage) {
@@ -365,7 +521,7 @@ class MainActivity : ComponentActivity() {
                         else -> "Preparando transferencia…"
                     },
                     cancellable = busy && operationStage != "choose_folder",
-                    message = message, transfer = transfer, sendQueue = sendQueue, offer = offer, activity = activity,
+                    message = message, transfer = transfer, sendQueue = sendQueue, offer = visibleOffer, batchOffer = batchOffer, activity = activity,
                     hasPending = pending != null, hasDiagnostic = diagnostic != null, canOpenReceived = lastReceived != null,
                     onSettings = { dialog = "settings" },
                     onScan = {
@@ -374,16 +530,21 @@ class MainActivity : ComponentActivity() {
                         else cameraPermission.launch(Manifest.permission.CAMERA)
                     },
                     onFolder = { dialog = "folder" }, onSend = { picker.launch(arrayOf("*/*")) },
-                    onReceive = { transfer = null; sendQueue = null; post("offers") { val offers = connected().offers(); runOnUiThread { offer = offers.firstOrNull(); if (offer == null) message = "No hay archivos ofrecidos por el PC. Elige un archivo allí y vuelve a pulsar Recibir." } } },
-                    onAccept = { receive() }, onDecline = {
+                    onReceive = { transfer = null; sendQueue = null; post("offers") { val inbox = connected().inbox(); updateUi { offer = inbox.transfer; batchOffer = inbox.batch; if (offer == null && batchOffer == null) message = "La bandeja se actualiza automáticamente. Elige los archivos en el PC; su solicitud aparecerá aquí." } } },
+                    onAccept = { visibleOffer?.let { receive(it) } }, onDetail = { dialog = "batch_detail" }, onDecline = {
+                        val batch = batchOffer
+                        if (batch != null) {
+                            batchOffer = null
+                            post("reject") { connected().cancelDownloadBatch(batch.id) }
+                        }
                         val selected = offer
                         if (selected != null) {
                             offer = null
                             post("reject") {
-                                try { connected().cancel(selected.id); runOnUiThread { message = "Solicitud rechazada." } }
+                                try { connected().cancel(selected.id); updateUi { message = "Solicitud rechazada." } }
                                 catch (error: Exception) {
                                     val details = TransferDiagnostics.describe("reject", error)
-                                    runOnUiThread { diagnostic = details; message = "Solicitud descartada en este teléfono. No se pudo confirmar el rechazo al PC." }
+                                    updateUi { diagnostic = details; message = "Solicitud descartada en este teléfono. No se pudo confirmar el rechazo al PC." }
                                 }
                             }
                         }
@@ -394,13 +555,18 @@ class MainActivity : ComponentActivity() {
                             val (id, hash) = item
                             val c = connected()
                             val state = try { c.status(id) } catch (error: ProtocolException) {
-                                if (transfer?.direction == "upload" && error.status == 404 && error.code == "not_found") null else throw error
+                                if (error.status == 404 && error.code == "not_found") null else throw error
+                            }
+                            if (transfer?.direction == "download" && (state == null || state.state in setOf("cancelled", "failed"))) {
+                                finish("Guardado y verificado; sesión remota terminada")
+                                updateUi { pending = null; message = "El archivo guardado y verificado se conserva. El PC terminó la operación; no necesitas descargarlo otra vez." }
+                                return@post
                             }
                             if (transfer?.direction == "upload" && (state == null || state.state in setOf("cancelled", "failed"))) {
                                 pendingUploadBatchId?.let { runCatching { c.cancelBatch(it) } }
                                 pendingUploadBatchId = null
                                 finish("Envío sin confirmación remota")
-                                runOnUiThread { pending = null; message = "El PC terminó la operación. Comprueba el destino antes de volver a enviar el archivo." }
+                                updateUi { pending = null; message = "El PC terminó la operación. Comprueba el destino antes de volver a enviar el archivo." }
                                 return@post
                             }
                             requireNotNull(state)
@@ -409,7 +575,7 @@ class MainActivity : ComponentActivity() {
                             pendingUploadBatchId?.let { runCatching { c.cancelBatch(it) } }
                             pendingUploadBatchId = null
                             finish(if (transfer?.direction == "download") "Recibido y verificado" else "Enviado y verificado")
-                            runOnUiThread { pending = null; message = "Confirmación remota completada." }
+                            updateUi { pending = null; message = "Confirmación remota completada." }
                         }
                     },
                     onDiagnostic = {
@@ -424,6 +590,14 @@ class MainActivity : ComponentActivity() {
                     },
                 )
                 when (dialog) {
+                    "batch_detail" -> EssentialDialog("Detalle del lote", { dialog = null }) {
+                        batchOffer?.let { batch ->
+                            Text("${batch.files.size} archivos · ${formatBytes(batch.files.sumOf { it.size })}")
+                            batch.files.forEach { FileRow(it.name, formatBytes(it.size)) }
+                            Text("Destino: $destination")
+                            Button(onClick = { receiveBatch(batch) }, enabled = !busy && pending == null) { Text("Aceptar lote") }
+                        }
+                    }
                     "settings" -> EssentialDialog("Ajustes", { dialog = null }) {
                         TextButton(onClick = { dialog = "folder" }, enabled = !busy) { Text("Carpeta de recepción") }
                         if (pair == null) {
@@ -438,7 +612,7 @@ class MainActivity : ComponentActivity() {
                                     val port = portText.toInt()
                                     require(Validation.ipv4(address) && port in 1024..65535)
                                     val updated = pair!!.copy(host = address, port = port)
-                                    store.save(updated); pair = updated
+                                    pair = updated
                                     message = "Dirección actualizada; se conserva la identidad emparejada."
                                     dialog = null
                                 }.onFailure { message = "IP o puerto no válido."; dialog = null }
@@ -457,7 +631,7 @@ class MainActivity : ComponentActivity() {
                         Button(onClick = { chooseFolder() }, enabled = !busy) { Text("Elegir carpeta") }
                         if (receiveStorage.selectedTree() != null) TextButton(enabled = !busy, onClick = {
                             dialog = null
-                            post("choose_folder") { receiveStorage.usePrivateInbox(); runOnUiThread { destination = receiveStorage.destinationLabel(); message = "Se usará la bandeja privada de la aplicación." } }
+                            post("choose_folder") { receiveStorage.usePrivateInbox(); updateUi { destination = receiveStorage.destinationLabel(); message = "Se usará la bandeja privada de la aplicación." } }
                         }) { Text("Usar bandeja privada") }
                         Text("Si Android no permite elegir la raíz de Descargas, crea una subcarpeta como File Transfer.", style = MaterialTheme.typography.bodySmall)
                     }
@@ -484,13 +658,20 @@ class MainActivity : ComponentActivity() {
                             message = "Confirmación cerrada en este teléfono."
                         }) { Text("Cerrar confirmación") }
                     }, dismissButton = { TextButton(onClick = { dialog = null }) { Text("Volver") } })
-                    "forget" -> AlertDialog(containerColor = MaterialTheme.colorScheme.surface, onDismissRequest = { dialog = null }, title = { Text("¿Olvidar este PC?") }, text = { Text("Se eliminará la conexión de este teléfono. También puedes revocar el dispositivo en el PC.") }, confirmButton = {
-                        TextButton(onClick = { store.forget(); pair = null; pending = null; offer = null; transfer = null; sendQueue = null; dialog = null; message = "Dispositivo olvidado en este teléfono." }) { Text("Olvidar") }
+                    "forget" -> AlertDialog(containerColor = MaterialTheme.colorScheme.surface, onDismissRequest = { dialog = null }, title = { Text("¿Olvidar este PC?") }, text = { Text("Se cerrará la sesión con el PC. Para volver a conectar tendrás que escanear otro QR.") }, confirmButton = {
+                        TextButton(onClick = { disconnectSession(); pair = null; pending = null; offer = null; batchOffer = null; transfer = null; sendQueue = null; dialog = null; message = "Dispositivo olvidado en este teléfono." }) { Text("Olvidar") }
                     }, dismissButton = { TextButton(onClick = { dialog = "settings" }) { Text("Volver") } })
                 }
             }
         }
     }
 
-    override fun onDestroy() { cancelled = true; client?.interrupt(); worker.shutdownNow(); super.onDestroy() }
+    override fun onDestroy() {
+        if (!isChangingConfigurations) {
+            disconnectSession()
+            worker.shutdownNow()
+            session.poller.shutdownNow()
+        }
+        super.onDestroy()
+    }
 }

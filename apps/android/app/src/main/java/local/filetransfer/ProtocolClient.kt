@@ -40,6 +40,7 @@ private fun strictObject(bytes: ByteArray): JSONObject {
             JsonToken.STRING -> reader.nextString()
             JsonToken.NUMBER -> { val n = reader.nextString(); require(Regex("0|[1-9][0-9]*").matches(n)); n.toInt() }
             JsonToken.BOOLEAN -> reader.nextBoolean()
+            JsonToken.NULL -> { reader.nextNull(); JSONObject.NULL }
             else -> throw IllegalArgumentException("JSON inválido")
         }
     }
@@ -121,10 +122,42 @@ internal fun uploadManifest(files: List<UploadFile>): JSONObject {
     return body
 }
 
+data class DownloadOfferBatch(val id: String, val files: List<UploadFile>) {
+    companion object {
+        fun parse(o: JSONObject): DownloadOfferBatch {
+            require(o.keys().asSequence().toSet() == setOf("batch_id", "files"))
+            val id = o.text("batch_id"); require(Validation.id(id))
+            val a = o.getJSONArray("files"); require(a.length() in 2..64)
+            val files = (0 until a.length()).map { index ->
+                val f = a.getJSONObject(index)
+                require(f.keys().asSequence().toSet() == setOf("file_name", "size_bytes"))
+                UploadFile(f.text("file_name"), Validation.size(f.text("size_bytes")))
+            }
+            return DownloadOfferBatch(id, files)
+        }
+    }
+}
+data class Inbox(val transfer: Transfer?, val batch: DownloadOfferBatch?) {
+    companion object {
+        fun parse(o: JSONObject): Inbox {
+            require(o.keys().asSequence().toSet() == setOf("transfer", "batch"))
+            val transfer = if (o.isNull("transfer")) null else Transfer.parse(o.getJSONObject("transfer")).also {
+                require(it.direction == "download" && it.state == "awaiting_acceptance")
+            }
+            val batch = if (o.isNull("batch")) null else DownloadOfferBatch.parse(o.getJSONObject("batch"))
+            require(transfer == null || batch == null)
+            return Inbox(transfer, batch)
+        }
+    }
+}
+internal fun requireReadyDownload(t: Transfer, file: UploadFile) {
+    require(t.direction == "download" && t.state == "ready" && t.bytes == 0L && t.name == file.name && t.size == file.size)
+}
+
 class ProtocolException(val code: String, val status: Int = 0) : IllegalStateException("Error remoto")
 
 /** Dedicated TLS client; check pin, dates and PKIX before any HTTP data is sent. */
-class ProtocolClient(private val host: String, private val port: Int, pin: String, private val deviceId: String, private var credential: String? = null) {
+class ProtocolClient(private val host: String, private val port: Int, pin: String, private val deviceId: String, private var credential: String? = null, private val shortTimeout: Boolean = false) {
     private val client: OkHttpClient
     @Volatile private var activeCall: Call? = null
     init {
@@ -143,11 +176,12 @@ class ProtocolClient(private val host: String, private val port: Int, pin: Strin
             }
         }
         val ssl = SSLContext.getInstance("TLS"); ssl.init(null, arrayOf(tm), null)
-        client = OkHttpClient.Builder().sslSocketFactory(ssl.socketFactory, tm).dns { name -> if (name != "file-transfer.local") throw java.net.UnknownHostException(name); listOf(InetAddress.getByAddress(host.split('.').map { it.toInt().toByte() }.toByteArray())) }.proxy(Proxy.NO_PROXY).followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).connectTimeout(15, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).writeTimeout(60, TimeUnit.SECONDS).build()
+        client = OkHttpClient.Builder().sslSocketFactory(ssl.socketFactory, tm).dns { name -> if (name != "file-transfer.local") throw java.net.UnknownHostException(name); listOf(InetAddress.getByAddress(host.split('.').map { it.toInt().toByte() }.toByteArray())) }.proxy(Proxy.NO_PROXY).followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).connectTimeout(if (shortTimeout) 3 else 15, TimeUnit.SECONDS).readTimeout(if (shortTimeout) 3 else 60, TimeUnit.SECONDS).writeTimeout(if (shortTimeout) 3 else 60, TimeUnit.SECONDS).callTimeout(if (shortTimeout) 4 else 0, TimeUnit.SECONDS).build()
     }
     fun interrupt() { activeCall?.cancel() }
     private fun req(path: String, method: String = "GET", body: RequestBody? = null, auth: Boolean = true): Response {
         val b = Request.Builder().url("https://file-transfer.local:$port/v1/$path").method(method, body).header("Accept-Encoding", "identity")
+        if (path == "pair" && method == "POST") b.header("X-FT-Inbox", "v1")
         if (auth) { b.header("X-Device-Id", deviceId); b.header("Authorization", "Bearer ${requireNotNull(credential)}") }
         val call = client.newCall(b.build()); activeCall = call
         return call.execute()
@@ -179,6 +213,20 @@ class ProtocolClient(private val host: String, private val port: Int, pin: Strin
     }
     fun cancelBatch(id: String) = UploadBatch.parse(json("${batchPath(id)}/cancel", "POST", JSONObject())).also { require(it.id == id) }
     fun offers(): List<Transfer> { val o = json("offers"); require(o.keys().asSequence().toSet() == setOf("transfers")); val a = o.getJSONArray("transfers"); require(a.length() <= 1); return (0 until a.length()).map { Transfer.parse(a.getJSONObject(it)).also { t -> require(t.direction == "download" && t.state == "awaiting_acceptance") } } }
+    /** Compatibility is allowed only after an authenticated route-not-found response. */
+    fun inbox(): Inbox = try { Inbox.parse(json("inbox")) } catch (error: ProtocolException) {
+        if (error.status != 404 || error.code != "not_found") throw error
+        Inbox(offers().firstOrNull(), null)
+    }
+    private fun downloadBatchPath(id: String): String { require(Validation.id(id)); return "download-batches/$id" }
+    fun downloadBatchStatus(id: String) = UploadBatch.parse(json(downloadBatchPath(id))).also { require(it.id == id) }
+    fun acceptDownloadBatch(id: String) = UploadBatch.parse(json("${downloadBatchPath(id)}/accept", "POST", JSONObject())).also { require(it.id == id && it.state == "accepted") }
+    fun startDownloadBatchFile(id: String, index: Int): Transfer {
+        require(index in 0..63)
+        return Transfer.parse(json("${downloadBatchPath(id)}/start", "POST", JSONObject().put("index", index)))
+    }
+    fun cancelDownloadBatch(id: String) = UploadBatch.parse(json("${downloadBatchPath(id)}/cancel", "POST", JSONObject())).also { require(it.id == id) }
+    fun disconnect() { val o = json("disconnect", "POST", JSONObject()); require(o.keys().asSequence().toSet() == setOf("disconnected") && o.get("disconnected") == true) }
     private fun path(id: String): String { require(Validation.id(id)); return "transfers/$id" }
     fun status(id: String) = Transfer.parse(json(path(id)))
     fun acceptDownload(id: String) = Transfer.parse(json("${path(id)}/accept", "POST", JSONObject()))

@@ -1,6 +1,7 @@
 package local.filetransfer
 
 import org.json.JSONObject
+import org.json.JSONArray
 import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -20,7 +21,7 @@ class CoreInteropTest {
         val root = Files.createTempDirectory("ft-interop-").toFile()
         val inbox = File(root, "inbox").apply { mkdir() }
         val port = ServerSocket(0).use { it.localPort }
-        val process = ProcessBuilder(binary!!, "serve", "--data", File(root, "state").path, "--bind", "127.0.0.1", "--port", port.toString()).redirectError(File(root, "core-stderr")).start()
+        val process = ProcessBuilder(binary!!, "serve", "--data", File(root, "state").path, "--bind", "127.0.0.1", "--port", port.toString(), "--ephemeral-peers").redirectError(File(root, "core-stderr")).start()
         val reader = process.inputStream.bufferedReader(); val writer = process.outputStream.bufferedWriter()
         val executor = Executors.newSingleThreadExecutor()
         fun receive(): JSONObject { val line = executor.submit<String?> { reader.readLine() }.get(30, TimeUnit.SECONDS); return JSONObject(requireNotNull(line)) }
@@ -36,6 +37,7 @@ class CoreInteropTest {
             val pair = c.pair(descriptor, "Prueba JVM")
             assertEquals(descriptor.serverId, pair.serverId)
             assertEquals("PC personal", pair.serverName)
+            assertTrue(command("snapshot").getJSONArray("peers").getJSONObject(0).getBoolean("supports_inbox"))
             command("receive", "enabled" to true)
             val bytes = ByteArray(1024 * 1024 + 31) { (it % 251).toByte() }
             val expected = MessageDigest.getInstance("SHA-256").digest(bytes).hex()
@@ -82,6 +84,44 @@ class CoreInteropTest {
             while (state.state == "streaming" && System.nanoTime() < limit) { Thread.sleep(100); state = c.status(transfer.id) }
             assertEquals("awaiting_verification", state.state); assertEquals(receivedHash, state.sha256)
             assertEquals("completed", c.complete(transfer.id, receivedHash).state)
+            val empty = File(root, "vacío.bin").apply { writeBytes(byteArrayOf()) }
+            assertEquals(Inbox(null, null), c.inbox())
+            val sessionId = command("snapshot").getJSONObject("session").getString("session_id")
+            val incoming = command("offer_download_batch", "peer_id" to id,
+                "sources" to JSONArray(listOf(source.path, empty.path)), "session_id" to sessionId)
+            val offeredBatch = requireNotNull(c.inbox().batch)
+            assertEquals(incoming.getString("batch_id"), offeredBatch.id)
+            assertEquals(listOf(UploadFile("origen.bin", bytes.size.toLong()), UploadFile("vacío.bin", 0)), offeredBatch.files)
+            val premature = runCatching { c.startDownloadBatchFile(offeredBatch.id, 0) }.exceptionOrNull() as ProtocolException
+            assertEquals("invalid_state", premature.code)
+            assertEquals("accepted", c.acceptDownloadBatch(offeredBatch.id).state)
+            // One acceptance covers the exact approved manifest. Completion gates the following file.
+            offeredBatch.files.forEachIndexed { index, file ->
+                val ready = c.startDownloadBatchFile(offeredBatch.id, index)
+                requireReadyDownload(ready, file)
+                val temp = File(root, "batch-$index.part")
+                val digest = temp.outputStream().use { c.downloadContent(ready.id, ready.size, it) {} }
+                val limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+                var remote = c.status(ready.id)
+                while (remote.state == "streaming" && System.nanoTime() < limit) { Thread.sleep(100); remote = c.status(ready.id) }
+                assertEquals("awaiting_verification", remote.state)
+                assertEquals(digest, remote.sha256)
+                val saved = PrivateInboxPublisher.publish(temp, inbox, ready.name, ready.size, digest)
+                assertArrayEquals(if (index == 0) bytes else byteArrayOf(), saved.readBytes())
+                assertEquals("completed", c.complete(ready.id, digest).state)
+                temp.delete()
+            }
+            assertEquals("completed", c.downloadBatchStatus(offeredBatch.id).state)
+            c.disconnect()
+            val expired = runCatching { c.inbox() }.exceptionOrNull() as ProtocolException
+            assertEquals(401, expired.status)
+            assertEquals(0, command("snapshot").getJSONArray("peers").length())
+            // A fresh scan uses a fresh UUID and works without recovering previous credentials.
+            val freshDescriptor = Descriptor.parse(command("pairing").toString())
+            val fresh = ProtocolClient(freshDescriptor.host, freshDescriptor.port, freshDescriptor.pin, UUID.randomUUID().toString())
+            fresh.pair(freshDescriptor, "Nuevo intento JVM")
+            assertEquals(Inbox(null, null), fresh.inbox())
+            fresh.disconnect()
             command("stop")
         } finally {
             process.destroy(); if (!process.waitFor(5, TimeUnit.SECONDS)) process.destroyForcibly()
