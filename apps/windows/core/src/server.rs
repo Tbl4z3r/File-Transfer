@@ -31,13 +31,20 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Serialize)]
 pub struct SessionInfo {
+    // Local desktop identity; never included in the v1 pairing descriptor.
+    pub session_id: String,
     pub host: String,
     pub port: u16,
     pub server_device_id: String,
     pub cert_sha256: String,
 }
 
-pub(crate) async fn start(engine: Arc<Engine>, bind: Ipv4Addr, port: u16) -> Result<SessionInfo> {
+pub(crate) async fn start(
+    engine: Arc<Engine>,
+    bind: Ipv4Addr,
+    port: u16,
+    automatic: bool,
+) -> Result<SessionInfo> {
     if bind.is_multicast() || bind.is_unspecified() || bind == Ipv4Addr::BROADCAST || port < 1024 {
         return Err(Fault::new(400, "invalid_request"));
     }
@@ -54,18 +61,35 @@ pub(crate) async fn start(engine: Arc<Engine>, bind: Ipv4Addr, port: u16) -> Res
     // Bind and reserve state atomically after the previous listener has actually closed.
     let cancel = CancellationToken::new();
     let closed = Arc::new(AtomicBool::new(false));
-    let info = SessionInfo {
-        host: bind.to_string(),
-        port,
-        server_device_id: engine.identity.id.clone(),
-        cert_sha256: engine.cert_sha256(),
-    };
     let mut inner = engine.lock();
     if inner.session.is_some() {
         return Err(Fault::new(409, "busy"));
     }
-    let listener =
-        std::net::TcpListener::bind(SocketAddr::from((bind, port))).map_err(|e| io_fault(&e))?;
+    // Keep the preferred socket on success; fall back only after the bind itself fails.
+    let listener = match std::net::TcpListener::bind(SocketAddr::from((bind, port))) {
+        Ok(listener) => listener,
+        Err(error)
+            if automatic
+                && matches!(
+                    error.kind(),
+                    io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
+                ) =>
+        {
+            std::net::TcpListener::bind(SocketAddr::from((bind, 0))).map_err(|e| io_fault(&e))?
+        }
+        Err(error) => return Err(io_fault(&error)),
+    };
+    let actual_port = listener.local_addr().map_err(|e| io_fault(&e))?.port();
+    if actual_port < 1024 {
+        return Err(Fault::new(400, "invalid_request"));
+    }
+    let info = SessionInfo {
+        session_id: new_id(),
+        host: bind.to_string(),
+        port: actual_port,
+        server_device_id: engine.identity.id.clone(),
+        cert_sha256: engine.cert_sha256(),
+    };
     listener.set_nonblocking(true).map_err(|e| io_fault(&e))?;
     let listener = TcpListener::from_std(listener).map_err(|e| io_fault(&e))?;
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(

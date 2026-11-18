@@ -13,7 +13,12 @@ type Transfer = {
   destination: string | null;
 };
 type Snapshot = {
-  session: null | { host: string; port: number; cert_sha256: string };
+  session: null | {
+    session_id: string;
+    host: string;
+    port: number;
+    cert_sha256: string;
+  };
   receive_enabled: boolean;
   peers: Peer[];
   transfers: Transfer[];
@@ -42,7 +47,7 @@ const invoke = <T>(
   return window.__TAURI__.core.invoke<T>(command, args);
 };
 const messages: Record<string, string> = {
-  invalid_request: "Comprueba la IPv4 del PC y el puerto (1024–65535).",
+  invalid_request: "Comprueba que la IPv4 pertenezca a este PC y esté conectada a tu red.",
   busy: "Termina o cancela la transferencia actual antes de iniciar otra.",
   io_error:
     "No se pudo acceder al archivo o abrir la conexión. Comprueba la carpeta, los permisos y que la IPv4 pertenezca a este PC.",
@@ -75,6 +80,92 @@ let descriptorUntil = 0;
 let pairingGeneration = 0;
 let refreshing = false;
 let busy = false;
+type SendBatch = {
+  sessionId: string;
+  peerId: string;
+  sources: string[];
+  index: number;
+  transferId: string | null;
+};
+let batch: SendBatch | null = null;
+let offering = false;
+let offerRevision = 0;
+function discardBatch(message?: string): void {
+  batch = null;
+  if (message) notice(message);
+  updateControls();
+}
+async function cancelBatch(): Promise<void> {
+  const id = batch?.transferId;
+  discardBatch("Lote cancelado. Los archivos pendientes no se enviarán.");
+  // An in-flight offer is cancelled by sendNext when its IPC reply arrives.
+  if (id) {
+    try {
+      await invoke("cancel_transfer", { transferId: id });
+    } catch (error) {
+      notice(messages[String(error)] ?? "No se pudo cancelar el archivo. Revisa su estado.", true);
+    }
+  }
+  await refresh();
+}
+async function sendNext(current: SendBatch): Promise<void> {
+  offering = true;
+  updateControls();
+  try {
+    const transfer = await invoke<Transfer>("offer_download", {
+      peerId: current.peerId,
+      source: current.sources[current.index],
+      sessionId: current.sessionId,
+    });
+    if (batch !== current) {
+      // Cancellation/revocation/close may happen while IPC is creating this offer.
+      try {
+        await invoke("cancel_transfer", { transferId: transfer.transfer_id });
+      } catch { /* Already terminal or session closed. */ }
+      return;
+    }
+    offerRevision++;
+    current.transferId = transfer.transfer_id;
+    notice("Oferta enviada. Confirma cada archivo en el móvil.");
+  } catch (error) {
+    if (batch === current) {
+      discardBatch();
+      notice(`${messages[String(error)] ?? "No se pudo ofrecer el archivo."} Los archivos pendientes no se enviarán.`, true);
+    }
+  } finally {
+    offering = false;
+    updateControls();
+    void refresh().catch(() => {});
+  }
+}
+function advanceBatch(snapshot: Snapshot): void {
+  const current = batch;
+  if (!current) return;
+  if (
+    snapshot.session?.session_id !== current.sessionId ||
+    !snapshot.peers.some((peer) => peer.id === current.peerId)
+  ) {
+    discardBatch("El lote se ha detenido porque la sesión o el dispositivo ya no están disponibles.");
+    return;
+  }
+  if (current.transferId) {
+    const transfer = snapshot.transfers.find((t) => t.transfer_id === current.transferId);
+    if (!transfer || transfer.state === "failed" || transfer.state === "cancelled") {
+      discardBatch("El lote se ha detenido. Los archivos pendientes no se enviarán.");
+      return;
+    }
+    if (transfer.state !== "completed") return;
+    current.index++;
+    current.transferId = null;
+    if (current.index === current.sources.length) {
+      discardBatch(`Lote completado: ${current.sources.length} archivos enviados y verificados.`);
+      return;
+    }
+  }
+  // Respect every other v1 transfer, including an incoming request during a gap.
+  if (!offering && !busy && !snapshot.transfers.some((t) => !terminal(t.state)))
+    void sendNext(current);
+}
 const samples = new Map<
   string,
   { bytes: bigint; time: number; speed: number }
@@ -161,6 +252,7 @@ async function action(run: () => Promise<void>): Promise<void> {
   } finally {
     busy = false;
     updateControls();
+    void refresh().catch(() => {});
   }
 }
 function formatBytes(value: bigint): string {
@@ -217,12 +309,16 @@ function updateControls(): void {
   $<HTMLButtonElement>("start-session").disabled = busy || active;
   $<HTMLButtonElement>("stop-session").disabled = busy || !active;
   $<HTMLInputElement>("bind-ip").disabled = active || busy;
-  $<HTMLInputElement>("port").disabled = active || busy;
   $<HTMLButtonElement>("pair").disabled = !active || busy;
   $<HTMLButtonElement>("receive").disabled = !active || busy;
   $<HTMLButtonElement>("choose-folder").disabled = !active || busy;
   $<HTMLButtonElement>("send-file").disabled =
-    !active || !selectedPeer || hasPending || busy;
+    !active || !selectedPeer || hasPending || busy || Boolean(batch) || offering;
+  $("batch-panel").classList.toggle("hidden", !batch);
+  $<HTMLButtonElement>("cancel-batch").disabled = !batch;
+  $("batch-status").textContent = batch
+    ? `Archivo ${batch.index + 1} de ${batch.sources.length} · ${batch.sources.length - batch.index - 1} pendientes · ${peerName(batch.peerId)}`
+    : "";
   $("receive").setAttribute(
     "aria-pressed",
     String(latest?.receive_enabled ?? false),
@@ -237,11 +333,13 @@ function updateControls(): void {
     ? "Inicia una sesión para conectar el móvil."
     : !latest?.peers.length
       ? "Muestra el QR para emparejar un móvil."
-      : hasPending
-        ? "Termina o cancela la transferencia actual para enviar otra."
-        : latest.receive_enabled
-          ? "Disponible para recibir. Autoriza cada solicitud aquí."
-          : "Elige un dispositivo para enviar o activa Recibir.";
+      : batch
+        ? "Cada archivo necesita confirmación en el móvil. Puedes cancelar el lote completo."
+        : hasPending
+          ? "Termina o cancela la transferencia actual para enviar otra."
+          : latest.receive_enabled
+            ? "Disponible para recibir. Autoriza cada solicitud aquí."
+            : "Elige un dispositivo para enviar o activa Recibir.";
   $("folder-label").textContent =
     selectedDestination ?? "Se elige al aceptar cada archivo";
   $("folder-hint").textContent = selectedDestination
@@ -351,9 +449,13 @@ function transferView(detailed: boolean): TransferView {
           cancel.type = "button";
           cancel.dataset.transferAction = "cancel";
           cancel.onclick = () => {
-            void action(async () => {
-              await invoke("cancel_transfer", { transferId: t.transfer_id });
-            });
+            if (batch?.transferId === t.transfer_id) {
+              void cancelBatch();
+            } else {
+              void action(async () => {
+                await invoke("cancel_transfer", { transferId: t.transfer_id });
+              });
+            }
           };
           actions.append(cancel);
         }
@@ -452,6 +554,7 @@ function renderPeers(): void {
     revoke.setAttribute("aria-label", `Revocar ${peer.name}`);
     revoke.onclick = () => {
       void action(async () => {
+        if (batch?.peerId === peer.id) discardBatch();
         await invoke("revoke_peer", { peerId: peer.id });
         notice(
           `${peer.name} ya no puede conectarse. Sus transferencias activas se han cancelado.`,
@@ -486,7 +589,10 @@ async function refresh(): Promise<void> {
   if (refreshing) return;
   refreshing = true;
   try {
-    latest = await invoke<Snapshot>("snapshot");
+    const revision = offerRevision;
+    const snapshot = await invoke<Snapshot>("snapshot");
+    if (revision !== offerRevision) return; // An offer completed after this snapshot was requested.
+    latest = snapshot;
     const active = latest.session !== null;
     $("session-badge").textContent = active
       ? "Sesión activa"
@@ -534,6 +640,7 @@ async function refresh(): Promise<void> {
       );
       delete recentContainer.dataset.transferId;
     }
+    advanceBatch(latest);
     updateControls();
   } finally {
     refreshing = false;
@@ -544,7 +651,6 @@ $("session-form").onsubmit = (event) => {
   void action(async () => {
     await invoke("start_session", {
       bindIpv4: $<HTMLInputElement>("bind-ip").value.trim(),
-      port: Number($<HTMLInputElement>("port").value),
     });
     selectedDestination = null;
     notice("Sesión abierta. Muestra el QR para emparejar tu móvil.");
@@ -553,6 +659,7 @@ $("session-form").onsubmit = (event) => {
 $("stop-session").onclick = () => {
   void action(async () => {
     hideDescriptor();
+    discardBatch();
     await invoke("stop_session");
     selectedDestination = null;
     $<HTMLDialogElement>("settings-panel").close();
@@ -575,12 +682,20 @@ $("choose-folder").onclick = () => {
 $("send-file").onclick = () => {
   void action(async () => {
     const peerId = selectedPeer;
-    if (!peerId) return;
-    const source = await invoke<string | null>("choose_source");
-    if (!source) return;
-    await invoke("offer_download", { peerId, source });
-    notice("Oferta enviada. Confirma la recepción en el móvil.");
+    const sessionId = latest?.session?.session_id;
+    if (!peerId || !sessionId || batch || offering) return;
+    const sources = await invoke<string[] | null>("choose_sources");
+    if (!sources?.length) return;
+    if (
+      latest?.session?.session_id !== sessionId ||
+      !latest.peers.some((peer) => peer.id === peerId)
+    ) return;
+    batch = { peerId, sessionId, sources, index: 0, transferId: null };
+    notice(`Lote preparado: ${sources.length} archivos. Confirma cada archivo en el móvil.`);
   });
+};
+$("cancel-batch").onclick = () => {
+  void cancelBatch();
 };
 $("pair").onclick = () => {
   void action(async () => {

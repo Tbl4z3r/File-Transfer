@@ -198,7 +198,7 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
         ),
   };
   const snapshot = {
-    session: { host: "192.168.1.20", port: 51337 },
+    session: { session_id: "session-a", host: "192.168.1.20", port: 51337 },
     receive_enabled: false,
     peers: [],
     transfers: [],
@@ -208,7 +208,8 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
     interval,
     pending,
     fail = false,
-    handler = async () => {};
+    handler = async () => {},
+    snapshotHandler = null;
   const context = {
     document,
     window: {
@@ -218,7 +219,10 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
         core: {
           invoke: async (command, args) => {
             calls.push({ command, args });
-            if (command === "snapshot") return structuredClone(snapshot);
+            if (command === "snapshot") {
+              const value = structuredClone(snapshot);
+              return snapshotHandler ? snapshotHandler(value) : value;
+            }
             if (command === "open_pairing_window") {
               if (fail) throw "io_error";
               return pending ? pending : fixture.messages.descriptor;
@@ -246,6 +250,7 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
     snapshot,
     calls,
     settle,
+    onSnapshot: (callback) => { snapshotHandler = callback; },
     onInvoke: (callback) => {
       handler = callback;
     },

@@ -183,7 +183,11 @@ impl Engine {
         digest(&self.cert)
     }
     pub async fn start_session(self: &Arc<Self>, bind: Ipv4Addr, port: u16) -> Result<SessionInfo> {
-        server::start(self.clone(), bind, port).await
+        server::start(self.clone(), bind, port, false).await
+    }
+    /// Desktop mode keeps the familiar port whenever available, otherwise lets the OS bind one.
+    pub async fn start_session_auto(self: &Arc<Self>, bind: Ipv4Addr) -> Result<SessionInfo> {
+        server::start(self.clone(), bind, 51337, true).await
     }
     pub fn stop_session(&self) {
         let mut inner = self.lock();
@@ -476,7 +480,24 @@ impl Engine {
         )
     }
     pub fn offer_download(&self, peer: &str, source: impl AsRef<Path>) -> Result<Transfer> {
-        let source = fs::canonicalize(source.as_ref()).map_err(|e| io_fault(&e))?;
+        self.offer_download_checked(peer, source.as_ref(), None)
+    }
+    /// Bind a desktop offer to the session in which its files were selected.
+    pub fn offer_download_in_session(
+        &self,
+        peer: &str,
+        source: impl AsRef<Path>,
+        session_id: &str,
+    ) -> Result<Transfer> {
+        self.offer_download_checked(peer, source.as_ref(), Some(session_id))
+    }
+    fn offer_download_checked(
+        &self,
+        peer: &str,
+        source: &Path,
+        session_id: Option<&str>,
+    ) -> Result<Transfer> {
+        let source = fs::canonicalize(source).map_err(|e| io_fault(&e))?;
         let name = source
             .file_name()
             .and_then(|s| s.to_str())
@@ -498,6 +519,14 @@ impl Engine {
             modified: metadata.modified().map_err(|e| io_fault(&e))?,
         };
         let mut inner = self.lock();
+        if session_id.is_some_and(|id| {
+            inner
+                .session
+                .as_ref()
+                .is_none_or(|session| session.info.session_id != id)
+        }) {
+            return Err(Fault::new(409, "session_closed"));
+        }
         self.expire_locked(&mut inner);
         Self::new_record(
             &mut inner,

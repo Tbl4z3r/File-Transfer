@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "file-transfer-windows"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "file-transfer-core",
  "serde_json",

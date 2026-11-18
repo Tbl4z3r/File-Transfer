@@ -32,13 +32,19 @@ temporal: `npm ci --cache=/tmp/h1-windows-npm-cache`.
 la aplicación en Windows requieren su entorno Windows; los resultados Linux no
 demuestran compatibilidad Windows.
 
-## Interfaz Enfoque (Windows 0.1.2)
+## Interfaz Enfoque (Windows 0.1.3)
 
-Inicio muestra la transferencia actual, dispositivos emparejados y las acciones **Enviar archivo** y **Recibir**. Elegir un dispositivo selecciona el destino; al enviar se abre el selector nativo y se ofrece el archivo para confirmarlo en Android. **Recibir** activa o desactiva las solicitudes, que siempre se aceptan o rechazan explícitamente.
+Inicio muestra la transferencia actual, dispositivos emparejados y las acciones **Enviar archivos** y **Recibir**. Elegir un dispositivo selecciona el destino; al enviar se abre el selector nativo con selección múltiple. Se conserva el dispositivo y la sesión de esa selección durante todo el lote, aunque se seleccione otro dispositivo en pantalla. Se ofrece un archivo cada vez y cada uno requiere confirmación explícita en Android. El siguiente se ofrece solo después de recibir el estado verificado `completed` del anterior. **Recibir** activa o desactiva las solicitudes, que siempre se aceptan o rechazan explícitamente.
+
+El lote muestra **Archivo i de n** y el número de pendientes. **Cancelar lote** descarta los pendientes y cancela el archivo activo; también funciona entre archivos o mientras llega la respuesta de una oferta. Rechazo, fallo, cancelación, revocación y cierre o reemplazo de sesión detienen el resto del lote. Los archivos ya completados se conservan. La cola vive únicamente en memoria; no hay streams paralelos, reanudación ni recuperación tras cerrar la app.
 
 La barra lateral abre **Actividad**, **Dispositivos** (incluye revocación) y **Ajustes** (dirección y cierre de sesión). La carpeta se elige con el selector nativo al aceptar, o antes con **Elegir**. Se reutiliza para las siguientes aceptaciones de esa sesión y se descarta al cerrarla; cambiarla no mueve una transferencia ya aceptada. No se guarda una preferencia persistente de carpeta.
 
 El tema sigue la preferencia clara/oscura del sistema. Los botones de la barra lateral tienen nombre accesible y ayuda al pasar el cursor o recibir foco.
+
+## Puerto automático
+
+Solo se introduce la IPv4 local del PC. El escritorio intenta enlazar directamente el puerto **51337** para conservar las conexiones existentes; si está ocupado o reservado, pide al sistema otro puerto en esa misma IPv4. No realiza sondeos ni abre el firewall. **Ajustes** muestra la dirección y el puerto reales, y el QR y los datos manuales anuncian ese mismo puerto. Si cambia, actualiza los datos de conexión en Android. La identidad TLS persistente se conserva. Un error al enlazar también el puerto alternativo deja la sesión cerrada y muestra un error recuperable. El core y la CLI conservan la opción de puerto explícito.
 
 ## Conexión por QR
 
@@ -46,6 +52,6 @@ Tras iniciar la sesión, pulsa **Mostrar QR**. En Android elige **Escanear QR de
 
 El código es negro sobre blanco, con corrección M, margen blanco de cuatro módulos y seis píxeles por módulo (414 × 414 px para el fixture actual). Se elimina de la pantalla, junto al JSON, al cerrarlo (incluido Escape), abandonar la página, cerrar sesión o vencer los 120 segundos. Una nueva ventana invalida el token anterior en el servidor. Ocultar solo retira los datos de la pantalla; el token mantiene su vencimiento original. No compartir capturas mientras sea válido.
 
-Para comprobar el frontend y su ciclo de vida: `npm run test:qr`. La suite ampliada `npm run test:ui` incluye estas pruebas de QR y añade comandos de sesión, selector y oferta de archivo, recepción, aceptación/cancelación, revocación, progreso mayor de 4 GiB y nombres tratados como texto. El adaptador DOM/IPC vive únicamente en `scripts/`; no se distribuye como backend ni demuestra ejecución nativa en Windows. Para interoperabilidad con un lector independiente, después de compilar ejecuta `node scripts/export-pairing-qr.mjs /tmp/qr-fixture.gif`: exporta únicamente el fixture público de `protocol/fixtures/h1-vectors.json` y el JSON esperado en `/tmp/qr-fixture.gif.json`.
+Para comprobar el frontend y su ciclo de vida: `npm run test:qr`. La suite ampliada `npm run test:ui` incluye estas pruebas de QR y añade comandos de sesión, selector múltiple, secuencia del lote, cancelación incluso entre archivos y con IPC diferido, vinculación a sesión/dispositivo, recepción, aceptación/cancelación, revocación, progreso mayor de 4 GiB y nombres tratados como texto. El adaptador DOM/IPC vive únicamente en `scripts/`; no se distribuye como backend ni demuestra ejecución nativa en Windows. Para interoperabilidad con un lector independiente, después de compilar ejecuta `node scripts/export-pairing-qr.mjs /tmp/qr-fixture.gif`: exporta únicamente el fixture público de `protocol/fixtures/h1-vectors.json` y el JSON esperado en `/tmp/qr-fixture.gif.json`.
 
 Dependencia gráfica: `qrcode-generator` **2.0.4**, MIT, fijada en el lock. `build.mjs` copia el ESM de navegador y su licencia a `dist/vendor/`; no se necesita bundler ni conexión de red en tiempo de ejecución. La licencia distribuida se conserva en `src/vendor/qrcode-LICENSE.txt`.

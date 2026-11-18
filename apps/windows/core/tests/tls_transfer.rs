@@ -775,3 +775,113 @@ async fn wait_for_failed(f: &Fixture, peer: &Paired, transfer_id: &str) -> Trans
     .await
     .expect("transfer should fail after its configured timeout")
 }
+
+#[tokio::test]
+async fn automatic_port_falls_back_and_advertises_the_bound_tls_listener() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let data = TempDir::new().unwrap();
+    let core = Engine::open(data.path(), "PC puerto automático").unwrap();
+    // The competing listener stays alive across bind; no probe-and-release race.
+    let occupied = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 51337)).unwrap();
+    assert!(
+        core.start_session(Ipv4Addr::LOCALHOST, 51337)
+            .await
+            .is_err()
+    );
+    assert!(core.snapshot().session.is_none());
+    let info = core.start_session_auto(Ipv4Addr::LOCALHOST).await.unwrap();
+    assert_ne!(info.port, 51337);
+    assert!(info.port >= 1024);
+    assert_eq!(info.host, "127.0.0.1");
+    let descriptor = core.open_pairing_window().unwrap();
+    assert_eq!(descriptor.port, info.port);
+    assert_eq!(descriptor.host, info.host);
+    assert_eq!(core.snapshot().session.unwrap().port, info.port);
+    assert!(
+        serde_json::to_value(&descriptor)
+            .unwrap()
+            .get("session_id")
+            .is_none()
+    );
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, info.port));
+    let response = client(core.certificate_der(), address)
+        .get(format!("https://{TLS_HOST}:{}/v1/offers", info.port))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    core.stop_session();
+    drop(occupied);
+    let preferred = core.start_session_auto(Ipv4Addr::LOCALHOST).await.unwrap();
+    assert_eq!(preferred.port, 51337);
+    assert_ne!(info.session_id, preferred.session_id);
+    assert_eq!(info.cert_sha256, preferred.cert_sha256);
+    core.stop_session();
+}
+
+#[tokio::test]
+async fn automatic_port_keeps_ipv4_validation_and_explicit_port_validation() {
+    let data = TempDir::new().unwrap();
+    let core = Engine::open(data.path(), "PC validación").unwrap();
+    for bind in [
+        Ipv4Addr::UNSPECIFIED,
+        Ipv4Addr::BROADCAST,
+        Ipv4Addr::new(224, 0, 0, 1),
+    ] {
+        assert_eq!(
+            core.start_session_auto(bind).await.err().unwrap().code,
+            "invalid_request"
+        );
+    }
+    for port in [0, 1023] {
+        assert_eq!(
+            core.start_session(Ipv4Addr::LOCALHOST, port)
+                .await
+                .err()
+                .unwrap()
+                .code,
+            "invalid_request"
+        );
+    }
+    assert!(core.snapshot().session.is_none());
+}
+
+#[tokio::test]
+async fn desktop_offer_is_bound_to_the_selected_session_even_after_same_address_restart() {
+    let f = Fixture::new().await;
+    let peer = f.pair().await;
+    let first = f.core.snapshot().session.unwrap();
+    let source = f.destination.path().join("lote.txt");
+    fs::write(&source, b"lote").unwrap();
+    assert_eq!(
+        f.core
+            .offer_download_in_session(&peer.id, &source, "stale-session")
+            .unwrap_err()
+            .code,
+        "session_closed"
+    );
+    let offered = f
+        .core
+        .offer_download_in_session(&peer.id, &source, &first.session_id)
+        .unwrap();
+    f.core.cancel(&offered.transfer_id).unwrap();
+    f.core.stop_session();
+    let second = f
+        .core
+        .start_session(Ipv4Addr::LOCALHOST, f.address.port())
+        .await
+        .unwrap();
+    assert_ne!(first.session_id, second.session_id);
+    assert_eq!(
+        f.core
+            .offer_download_in_session(&peer.id, &source, &first.session_id)
+            .unwrap_err()
+            .code,
+        "session_closed"
+    );
+    assert!(f.core.snapshot().transfers.is_empty());
+    f.core
+        .offer_download_in_session(&peer.id, &source, &second.session_id)
+        .unwrap();
+    f.core.stop_session();
+}
