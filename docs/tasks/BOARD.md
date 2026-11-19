@@ -17,6 +17,7 @@ Estados: pendiente → lista → en curso → en revisión → cambios solicitad
 | SESION-BANDEJA | Retirar vínculos al cerrar y mostrar ofertas de Windows con detalle en Android | GPT-6.2 | en prueba; confirmar en dispositivos | QR y manifiestos de lote |
 | ARRANQUE-DISEÑO | Selección automática de IPv4, fondo atenuado y acceso por archivo en Android | GPT-6.2 y dos implementadores Sol | en prueba | Lotes verificados en ambos sentidos por el usuario |
 | REINTENTOS | Recuperar selecciones pendientes tras un corte, usar unidades decimales y paleta petróleo y menta | GPT-6.2 y dos implementadores Sol | en prueba | Lotes y vinculación por sesión |
+| SEGUNDO-PLANO-AJUSTES | Mantener transferencias Android activas al cambiar de app, simplificar el vínculo manual y diseñar iconos | GPT-6.2 y dos implementadores Sol | en prueba | Vinculación TLS y lotes |
 | H2–H5 | Descubrimiento, uso cotidiano, recuperación y distribución | por asignar | pendiente | H1 validado |
 
 La revisión del autor no equivale a aprobación. Las verificaciones en dispositivos físicos y mediciones de la LAN requieren acceso real al Windows y al J4+.

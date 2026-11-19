@@ -29,6 +29,6 @@ CI comprueba el protocolo, núcleo Linux, interfaz y shell Windows, APK/lint/pru
 
 ## Límites actuales
 
-Mantén Android abierto durante la transferencia. Un corte detiene el lote. Los archivos verificados se conservan y puedes elegir los que quedaron pendientes. Quedan por comprobar el puerto automático y los lotes en dispositivos físicos. El descubrimiento mDNS, la reanudación y la distribución estable siguen pendientes.
+Después de iniciar el envío o aceptar la recepción, puedes cambiar de aplicación en Android. La notificación de transferencia permite volver a File Transfer o cancelar. Un corte de red detiene el lote. Los archivos verificados se conservan y puedes elegir los que quedaron pendientes. Quedan por comprobar el puerto automático y los lotes en dispositivos físicos. El descubrimiento mDNS, la reanudación y la distribución estable siguen pendientes.
 
 [Continuidad](docs/CONTINUITY.md) · [Tablero](docs/tasks/BOARD.md) · [Alcance original](docs/project-brief.es.md)
