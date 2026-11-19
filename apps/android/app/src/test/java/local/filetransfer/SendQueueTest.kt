@@ -4,6 +4,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SendQueueTest {
+    @Test fun batchBytesDoNotCountConfirmedCurrentFileTwice() {
+        assertEquals(130L, SendQueueProgress(2, 3, 1, true, 100, 600).bytesWith(30))
+        assertEquals(300L, SendQueueProgress(2, 3, 2, false, 300, 600).bytesWith(200))
+        assertEquals(600L, SendQueueProgress(3, 3, 3, false, 600, 600).bytesWith(300))
+        assertEquals(100L, SendQueueProgress(1, 1, 0, true, 0, 100).bytesWith(900))
+    }
+
     @Test fun secondFileStartsOnlyAfterFirstCompleted() {
         val events = mutableListOf<String>()
         val states = mutableListOf<SendQueueProgress>()

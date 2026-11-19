@@ -37,6 +37,7 @@ object TransferDiagnostics {
         if (error is ReceiveStorageException) return error.message ?: "No se pudo guardar el archivo. Elige otra carpeta."
         if (cancelled) return "Transferencia cancelada."
         if (error is SendSelectionException) return requireNotNull(error.message)
+        if (stage == "queue_import") return "No se pudieron guardar los archivos en la cola. Comprueba el espacio libre y compártelos o selecciónalos otra vez."
         if (stage == "pair") return "No se pudo emparejar. Comprueba la red y abre un nuevo QR o código en el PC."
         if (stage == "publish") return "Se recibió el archivo, pero no se pudo guardar en el destino. Comprueba el espacio y vuelve a elegir la carpeta."
         if (error is SecurityException) return "Se perdió un permiso de acceso. Vuelve a elegir el archivo o la carpeta."

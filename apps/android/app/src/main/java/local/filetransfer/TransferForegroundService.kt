@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -21,6 +22,7 @@ internal object ActiveTransfer {
     private val main = Handler(Looper.getMainLooper())
     private val operation = TransferOperation()
     private var lastNotification = 0L
+    private var notificationStage: String? = null
     private var foregroundVisible = false
     var notification: Notification? = null
         private set
@@ -30,18 +32,36 @@ internal object ActiveTransfer {
     // Android 15+ dataSync has a six hour budget. Older versions use the same bounded window.
     const val MAX_DURATION_MS = 6 * 60 * 60 * 1000L
 
-    fun start(context: Context, ready: () -> Unit, cancel: (Boolean) -> Unit, failed: (Exception) -> Unit): Long {
+    fun start(context: Context, ready: () -> Unit, cancel: (Boolean) -> Unit, failed: (Exception) -> Unit, sourceUris: List<android.net.Uri> = emptyList()): Long {
         val id = operation.begin(ready, cancel, failed)
         foregroundVisible = false
+        context.getSystemService(NotificationManager::class.java).cancel(TransferForegroundService.FINISHED_NOTIFICATION)
         notification = TransferForegroundService.notification(context, "Preparando transferencia", null)
         lastNotification = 0L
+        notificationStage = null
         try {
-            ContextCompat.startForegroundService(context, Intent(context, TransferForegroundService::class.java).putExtra("operation_id", id))
+            ContextCompat.startForegroundService(context, sourceIntent(context, id, sourceUris))
         } catch (error: Exception) {
             operation.fail(id, error)
             notification = null
         }
         return id
+    }
+
+    /** Forward temporary Activity grants to the running service until its private copies are closed. */
+    private fun sourceIntent(context: Context, id: Long, sources: List<android.net.Uri>) =
+        Intent(context, TransferForegroundService::class.java).putExtra("operation_id", id).apply {
+            if (sources.isNotEmpty()) {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                clipData = ClipData.newRawUri("Archivos en cola", sources.first()).apply {
+                    sources.drop(1).forEach { addItem(ClipData.Item(it)) }
+                }
+            }
+        }
+
+    fun retainSources(context: Context, sources: List<android.net.Uri>) {
+        val id = currentId ?: return
+        ContextCompat.startForegroundService(context, sourceIntent(context, id, sources))
     }
 
     fun ready(id: Long?) {
@@ -57,13 +77,18 @@ internal object ActiveTransfer {
         operation.fail(id, error)
         notification = null
     }
-    fun finish(context: Context, id: Long) {
+    fun finish(context: Context, id: Long, result: String? = null) {
         val finish = {
             if (operation.finish(id)) {
                 foregroundVisible = false
                 notification = null
                 context.getSystemService(NotificationManager::class.java).cancel(TransferForegroundService.NOTIFICATION)
                 context.stopService(Intent(context, TransferForegroundService::class.java))
+                if (result != null) {
+                    val manager = context.getSystemService(NotificationManager::class.java)
+                    if (manager.areNotificationsEnabled()) manager.notify(TransferForegroundService.FINISHED_NOTIFICATION,
+                        TransferForegroundService.notification(context, result, null, finished = true))
+                }
             }
         }
         if (Looper.myLooper() == Looper.getMainLooper()) finish() else main.post { finish() }
@@ -71,11 +96,18 @@ internal object ActiveTransfer {
     fun progress(context: Context, transfer: TransferPresentation?, queue: SendQueueProgress?) {
         if (!operation.started || !foregroundVisible) return
         val now = android.os.SystemClock.elapsedRealtime()
-        if (now - lastNotification < 1_000L) return
+        val stage = "${queue?.current}:${transfer?.name}:${transfer?.phase}"
+        if (stage == notificationStage && now - lastNotification < 1_000L) return
+        notificationStage = stage
         lastNotification = now
-        val prefix = queue?.takeIf { it.total > 1 }?.let { "${it.current} de ${it.total} · " }.orEmpty()
-        val text = prefix + (transfer?.phase ?: "Preparando transferencia")
-        val progress = transfer?.takeIf { it.size > 0L }?.let { (it.bytes.toDouble() / it.size * 1_000).toInt().coerceIn(0, 1_000) }
+        val prefix = queue?.takeIf { it.total > 1 }?.let {
+            if (it.current > 0) "Archivo ${it.current} de ${it.total} · " else "${it.total} archivos · "
+        }.orEmpty()
+        val total = queue?.totalBytes ?: transfer?.size
+        val bytes = queue?.takeIf { it.totalBytes != null }?.bytesWith(transfer?.bytes ?: 0) ?: transfer?.bytes
+        val counts = if (bytes != null && total != null) "${formatBytes(bytes)} de ${formatBytes(total)}" else null
+        val text = prefix + (transfer?.phase ?: "Preparando transferencia") + counts?.let { " · $it" }.orEmpty()
+        val progress = total?.takeIf { it > 0L }?.let { ((bytes ?: 0).toDouble() / it * 1_000).toInt().coerceIn(0, 1_000) }
         notification = TransferForegroundService.notification(context, text, progress)
         context.getSystemService(NotificationManager::class.java).notify(TransferForegroundService.NOTIFICATION, notification)
     }
@@ -166,25 +198,28 @@ class TransferForegroundService : Service() {
 
     companion object {
         internal const val NOTIFICATION = 101
+        internal const val FINISHED_NOTIFICATION = 102
         private const val CHANNEL = "active_transfers"
         private const val CANCEL = "local.filetransfer.CANCEL_TRANSFER"
-        internal fun notification(context: Context, text: String, progress: Int?): Notification {
+        internal fun notification(context: Context, text: String, progress: Int?, finished: Boolean = false): Notification {
             val open = PendingIntent.getActivity(context, 0, Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             val cancel = PendingIntent.getService(context, 1, Intent(context, TransferForegroundService::class.java).setAction(CANCEL)
                 .setData(android.net.Uri.parse("filetransfer://operation/${ActiveTransfer.currentId}"))
                 .putExtra("operation_id", ActiveTransfer.currentId ?: -1L), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-            return Notification.Builder(context, CHANNEL)
+            val builder = Notification.Builder(context, CHANNEL)
                 .setSmallIcon(R.drawable.ic_transfer_status)
                 .setContentTitle("File Transfer")
                 .setContentText(text)
                 .setContentIntent(open)
-                .setOngoing(true)
+                .setOngoing(!finished)
+                .setAutoCancel(finished)
                 .setOnlyAlertOnce(true)
-                .setCategory(Notification.CATEGORY_PROGRESS)
+                .setCategory(if (finished) Notification.CATEGORY_STATUS else Notification.CATEGORY_PROGRESS)
+                .setStyle(Notification.BigTextStyle().bigText(text))
                 .setVisibility(Notification.VISIBILITY_PRIVATE)
-                .setProgress(1_000, progress ?: 0, progress == null)
+            if (!finished) builder.setProgress(1_000, progress ?: 0, progress == null)
                 .addAction(Notification.Action.Builder(null, "Cancelar", cancel).build())
-                .build()
+            return builder.build()
         }
     }
 }

@@ -126,6 +126,7 @@ private fun SectionTitle(text: String) {
 internal fun EsencialScreen(
     pairedName: String?, pairedHost: String?, deviceName: String, destination: String, busy: Boolean, busyLabel: String, cancellable: Boolean, message: String,
     transfer: TransferPresentation?, sendQueue: SendQueueProgress?, offer: Transfer?, batchOffer: DownloadOfferBatch?, activity: List<TransferPresentation>,
+    outgoing: OutgoingState, queuedForOtherPeer: Boolean, onSendOutgoing: () -> Unit, onHoldOutgoing: () -> Unit, onRemoveOutgoing: (OutgoingFile) -> Unit,
     hasPending: Boolean, canRetrySend: Boolean, canRetryInbox: Boolean,
     onSettings: () -> Unit, onEditName: () -> Unit, onScan: () -> Unit, onFolder: () -> Unit,
     onSend: () -> Unit, onReceive: () -> Unit, onAccept: () -> Unit, onDetail: () -> Unit, onDecline: () -> Unit,
@@ -165,6 +166,7 @@ internal fun EsencialScreen(
                                 Spacer(Modifier.width(8.dp))
                                 Text("Escanear QR")
                             }
+                            OutlinedButton(onClick = onSend, enabled = !busy && !hasPending, modifier = Modifier.fillMaxWidth()) { Text("Elegir archivos") }
                         } else {
                             FileRow(pairedName ?: "PC emparejado", "Vinculado · $pairedHost", "pc")
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -175,7 +177,29 @@ internal fun EsencialScreen(
                         }
                     }
                 }
-                if (pairedHost != null || canRetrySend || canRetryInbox) {
+                if (outgoing.files.isNotEmpty()) {
+                    Surface(shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, colors.outlineVariant)) {
+                        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            SectionTitle("Cola de envío · ${outgoing.files.size} archivos")
+                            Text(when { queuedForOtherPeer -> "Hay archivos preparados para otro PC. Pulsa Enviar cola para elegir este PC."; outgoing.armed -> "Preparada para enviar al conectar con el PC y abrir esta pantalla."; else -> "En espera · se conserva al cerrar la aplicación." }, style = MaterialTheme.typography.bodySmall)
+                            outgoing.files.forEach { entry ->
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(entry.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(formatBytes(entry.size) + when { entry.uncertain -> " · Sin confirmar; comprueba el PC"; entry.armed -> " · Preparado para enviar"; else -> " · En espera" }, style = MaterialTheme.typography.bodySmall)
+                                    }
+                                    TextButton(onClick = { onRemoveOutgoing(entry) }, enabled = !busy && !hasPending) { Text("Eliminar") }
+                                }
+                            }
+                            Button(onClick = onSendOutgoing, enabled = !busy && !hasPending && offer == null && batchOffer == null) {
+                                Text(if (pairedHost == null) "Enviar al conectar" else "Enviar cola")
+                            }
+                            if (outgoing.armed) TextButton(onClick = onHoldOutgoing, enabled = !busy) { Text("Dejar en espera") }
+                            Text("Copias privadas: eliminarlas de la cola libera espacio; los originales se conservan.", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+                if (pairedHost != null || canRetrySend || canRetryInbox || busy) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         SectionTitle("Transferencia actual")
                         Surface(shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, colors.outlineVariant)) {
