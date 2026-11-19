@@ -149,11 +149,33 @@ async fn choose_sources(app: tauri::AppHandle) -> Result<Option<Vec<ChosenSource
         None => Ok(None),
     }
 }
-#[tauri::command]
 async fn inspect_sources(paths: Vec<PathBuf>) -> Result<Vec<ChosenSource>, String> {
-    inspect_selection(paths)
-        .await
-        .map(|selection| selection.sources)
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .map(|source| {
+                let file = std::fs::File::open(&source).map_err(|_| "io_error".to_owned())?;
+                let metadata = file.metadata().map_err(|_| "io_error".to_owned())?;
+                if !metadata.is_file() {
+                    return Err("invalid_request".to_owned());
+                }
+                let file_name = source
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| "invalid_name".to_owned())?
+                    .to_owned();
+                let modified = metadata.modified().map_err(|_| "io_error".to_owned())?;
+                Ok(ChosenSource {
+                    source,
+                    file_name,
+                    stamp: SourceStamp::new(metadata.len(), modified),
+                    relative_path: None,
+                })
+            })
+            .collect()
+    })
+    .await
+    .map_err(|_| "io_error".to_owned())?
 }
 #[tauri::command]
 async fn inspect_selection(paths: Vec<PathBuf>) -> Result<FolderSelection, String> {
@@ -270,7 +292,6 @@ fn main() {
             cancel_download_batch,
             cancel_transfer,
             choose_sources,
-            inspect_sources,
             inspect_selection,
             choose_source_folder,
             validate_folder_selection,
