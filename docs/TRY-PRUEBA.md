@@ -1,6 +1,6 @@
 # Probar la rama prueba en Windows y Android
 
-Esta entrega añade transferencias activas en segundo plano en Android, un código de emparejamiento copiable y una pantalla de Ajustes con versión y registro de errores. Actualiza ambos clientes. El APK usa firma de desarrollo.
+Esta entrega añade colas de envío, Compartir desde Android, arrastrar desde el Explorador de Windows, envío de carpetas y progreso fuera de la ventana. Actualiza ambos clientes. El APK usa firma de desarrollo.
 
 ## Obtener aplicaciones
 
@@ -26,6 +26,13 @@ En Android abre el detalle de actividad después de recibir dos archivos en dest
 Para comprobar las unidades, envía un archivo de exactamente 1 000 000 bytes y verifica que ambos equipos muestren 1 MB. Para probar el reintento, corta la conexión mientras se envía el segundo archivo de un lote de tres. Vuelve a vincular los equipos si la sesión caducó. En el dispositivo de origen, reintenta el envío y comprueba en el destino que el primer archivo verificado tiene una sola copia. Repite en el otro sentido.
 
 Comprueba el segundo plano con dos archivos grandes, en ambos sentidos. Inicia el envío, acepta la solicitud y cambia de aplicación mientras avanzan los bytes. Bloquea la pantalla y comprueba al volver que el lote sigue avanzando o terminó y que los archivos se guardaron íntegros. Repite usando **Cancelar** en la notificación y comprueba que se conserve lo ya verificado.
+
+## Cola y carpetas
+
+1. Con Android desconectado, selecciona varios archivos en la galería o en Archivos y usa **Compartir → File Transfer**. Espera a que aparezcan guardados en la cola. Activa **Recibir** en el PC y vincula el móvil por QR. Comprueba que Windows muestra una sola solicitud con los archivos compartidos. Añade otra selección con **Dejar en espera** y comprueba que requiere enviarla tú.
+2. Arrastra archivos del Explorador a File Transfer sin sesión. Comprueba que siguen en espera después de cerrar y volver a abrir la aplicación. Conecta dos móviles, elige el destinatario de la selección y comprueba que solo ese recibe la oferta. Repite soltando sobre el dispositivo conectado para ofrecer los archivos directamente a ese móvil.
+3. Prepara una carpeta con una subcarpeta vacía y dos archivos del mismo nombre en subcarpetas distintas. Envíala primero desde el PC y luego desde Android. Antes de aceptar, abre el detalle y comprueba las rutas y los tamaños. Repite con un destino que ya contiene una carpeta con el mismo nombre. Las dos versiones deben conservarse.
+4. Minimiza Windows y cambia de aplicación en Android durante un lote grande. Comprueba que la barra de tareas de Windows sigue mostrando el avance y que la notificación de Android indica el archivo actual y el avance del lote.
 
 ## Resultado que falta registrar
 
