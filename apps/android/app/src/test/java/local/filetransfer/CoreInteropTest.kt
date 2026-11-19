@@ -83,7 +83,24 @@ class CoreInteropTest {
             var state = c.status(transfer.id); val limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
             while (state.state == "streaming" && System.nanoTime() < limit) { Thread.sleep(100); state = c.status(transfer.id) }
             assertEquals("awaiting_verification", state.state); assertEquals(receivedHash, state.sha256)
-            assertEquals("completed", c.complete(transfer.id, receivedHash).state)
+            // Model slow local SAF publication: no content/status requests renew the 45 s lease.
+            // The independent service heartbeat must keep authentication alive until confirmation.
+            val heartbeat = ProtocolClient(pair.host, pair.port, pair.pin, pair.deviceId, pair.credential, shortTimeout = true)
+            val heartbeatWorker = Executors.newSingleThreadScheduledExecutor()
+            val heartbeatFailure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+            val heartbeatTask = heartbeatWorker.scheduleWithFixedDelay({
+                try { heartbeat.inbox() } catch (error: Exception) { heartbeatFailure.compareAndSet(null, error) }
+            }, 0, 2, TimeUnit.SECONDS)
+            try {
+                val publicationDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(47)
+                while (System.nanoTime() < publicationDeadline) Thread.sleep(100)
+                assertNull("Authenticated heartbeat failed during local publication", heartbeatFailure.get())
+                assertEquals("completed", c.complete(transfer.id, receivedHash).state)
+            } finally {
+                heartbeatTask.cancel(false)
+                heartbeat.interrupt()
+                heartbeatWorker.shutdownNow()
+            }
             val empty = File(root, "vacío.bin").apply { writeBytes(byteArrayOf()) }
             assertEquals(Inbox(null, null), c.inbox())
             val sessionId = command("snapshot").getJSONObject("session").getString("session_id")

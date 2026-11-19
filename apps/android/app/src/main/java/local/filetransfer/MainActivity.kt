@@ -7,6 +7,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Build
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.widget.Toast
@@ -47,7 +48,11 @@ class MainActivity : ComponentActivity() {
         @Volatile var operationStage = "idle"
         @Volatile var pendingUploadBatchId: String? = null
         @Volatile var generation = 0L
+        @Volatile var operationEpoch = 0L
+        @Volatile var backgroundTimedOut = false
         val operationGeneration = ThreadLocal<Long>()
+        var uiOwner: Any? = null
+        var disposePoll: (() -> Unit)? = null
         val pair = mutableStateOf<Pairing?>(null)
         val message = mutableStateOf("")
         val destination = mutableStateOf("")
@@ -69,6 +74,10 @@ class MainActivity : ComponentActivity() {
         }
 
         fun historyTrees() = activity.value.mapNotNull { it.receipt?.location?.tree }.toSet()
+    }
+    companion object {
+        // A session with foreground work retains its progress/results for a later Activity.
+        private var backgroundSession: Session? = null
     }
     private lateinit var session: Session
     private val worker get() = session.worker
@@ -92,7 +101,12 @@ class MainActivity : ComponentActivity() {
 
     private fun updateUi(action: () -> Unit) {
         val generation = session.operationGeneration.get() ?: session.generation
-        runOnUiThread { if (generation == session.generation) action() }
+        runOnUiThread {
+            if (generation == session.generation) {
+                action()
+                ActiveTransfer.progress(applicationContext, session.transfer.value, session.sendQueue.value)
+            }
+        }
     }
 
     private fun bestEffortDisconnect(p: Pairing) {
@@ -102,6 +116,10 @@ class MainActivity : ComponentActivity() {
     private fun disconnectSession(preserveRetry: Boolean = false, notifyPeer: Boolean = true) {
         val p = session.pair.value
         session.generation++
+        session.disposePoll?.invoke()
+        session.disposePoll = null
+        ActiveTransfer.currentId?.let { ActiveTransfer.finish(applicationContext, it) }
+        if (backgroundSession === session) backgroundSession = null
         session.pair.value = null
         session.cancelled = true
         session.busy.value = false
@@ -134,7 +152,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        session = (lastCustomNonConfigurationInstance as? Session) ?: Session()
+        session = backgroundSession
+            ?: (lastCustomNonConfigurationInstance as? Session) ?: Session()
+        session.uiOwner = this
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
@@ -144,7 +164,7 @@ class MainActivity : ComponentActivity() {
             receiveStorage.pruneHistoryGrants(emptySet())
             session.destination.value = receiveStorage.destinationLabel()
         }
-        File(filesDir, "partial").apply { mkdirs(); if (lastCustomNonConfigurationInstance == null) listFiles()?.forEach { it.delete() } }
+        File(filesDir, "partial").apply { mkdirs(); if (lastCustomNonConfigurationInstance == null && backgroundSession == null) listFiles()?.forEach { it.delete() } }
         PairStore(this) // Discard credentials left by older versions; never restore pairing.
         setContent {
             var pair by remember { session.pair }
@@ -228,28 +248,64 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+            val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
             fun post(stage: String = "operation", transferOperation: Boolean = false, block: () -> Unit) {
                 val operationGeneration = session.generation
+                session.operationEpoch++
+                session.backgroundTimedOut = false
                 cancelled = false
                 busy = true
-                diagnostic = null
                 message = ""
                 operationStage = stage
-                worker.execute {
-                    if (operationGeneration != session.generation) return@execute
-                    session.operationGeneration.set(operationGeneration)
-                    try { block() }
-                    catch (error: Exception) {
-                        val details = TransferDiagnostics.describe(operationStage, error)
-                        val explanation = TransferDiagnostics.userMessage(operationStage, error, cancelled)
-                        if (transferOperation) finish(if (cancelled) "Cancelada" else "No completada")
-                        updateUi { if (session.generation == operationGeneration) { diagnostic = details; message = explanation } }
-                    } finally {
-                        transferId = null
-                        updateUi { busy = false }
-                        session.operationGeneration.remove()
+                var foregroundId: Long? = null
+                val execute = {
+                    worker.execute {
+                        session.operationGeneration.set(operationGeneration)
+                        try {
+                            if (operationGeneration == session.generation && !cancelled) block()
+                        } catch (error: Exception) {
+                            val details = TransferDiagnostics.describe(operationStage, error)
+                            val explanation = if (session.backgroundTimedOut)
+                                "Android terminó el tiempo permitido para esta transferencia. Los archivos verificados se conservan; vuelve a enviar los pendientes."
+                            else TransferDiagnostics.userMessage(operationStage, error, cancelled)
+                            if (transferOperation) finish(if (cancelled) "Cancelada" else "No completada")
+                            updateUi { diagnostic = details; message = explanation }
+                        } finally {
+                            transferId = null
+                            foregroundId?.let { ActiveTransfer.finish(applicationContext, it) }
+                            updateUi {
+                                busy = false
+                                if (session.uiOwner == null) {
+                                    session.disposePoll?.invoke()
+                                    session.disposePoll = null
+                                }
+                            }
+                            session.operationGeneration.remove()
+                        }
                     }
+                    Unit
                 }
+                if (transferOperation || stage == "confirm") {
+                    backgroundSession = session
+                    foregroundId = ActiveTransfer.start(applicationContext, ready = execute, cancel = { timeout ->
+                        session.backgroundTimedOut = timeout
+                        cancelled = true
+                        client?.interrupt()
+                        if (session.uiOwner == null) {
+                            session.disposePoll?.invoke()
+                            session.disposePoll = null
+                        }
+                        message = if (timeout) "Android terminó el tiempo permitido para esta transferencia." else "Cancelando…"
+                    }, failed = { error ->
+                        backgroundSession = null
+                        busy = false
+                        diagnostic = TransferDiagnostics.describe(stage, error)
+                        message = "No se pudo iniciar la transferencia en segundo plano. Vuelve a intentarlo con la aplicación abierta."
+                    })
+                    if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                } else execute()
             }
             fun connected(): ProtocolClient {
                 val p = requireNotNull(pair)
@@ -518,15 +574,19 @@ class MainActivity : ComponentActivity() {
             }
             val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { startUpload(it) }
             DisposableEffect(pair) {
+                session.disposePoll?.invoke()
                 val p = pair
                 val generation = session.generation
                 val disposed = java.util.concurrent.atomic.AtomicBoolean(false)
-                var losses = 0
+                val pollHealth = SessionPollHealth()
                 val pollClient = p?.let { ProtocolClient(it.host, it.port, it.pin, it.deviceId, it.credential, shortTimeout = true) }
                 val task = pollClient?.let { c -> session.poller.scheduleWithFixedDelay({
+                    val pollEpoch = session.operationEpoch
                     try {
+                        // Independent authenticated heartbeat also renews the PC's 45 s lease
+                        // during long content streams and local verified SAF publication.
                         val inbox = c.inbox()
-                        losses = 0
+                        pollHealth.success()
                         updateUi {
                             if (!disposed.get() && session.generation == generation && pair == p && !busy && pending == null) {
                                 if (dialog == "batch_detail" && batchOffer != inbox.batch) dialog = null
@@ -536,8 +596,8 @@ class MainActivity : ComponentActivity() {
                         }
                     } catch (error: Exception) {
                         val gone = error is ProtocolException && (error.status == 401 || error.code == "session_closed")
-                        if (gone || ++losses >= 4) updateUi {
-                            if (!disposed.get() && session.generation == generation && pair == p && !busy) {
+                        if (pollHealth.failure(gone, busy, pollEpoch, session.operationEpoch)) updateUi {
+                            if (!disposed.get() && session.generation == generation && pair == p && (gone || !busy)) {
                                 disconnectSession(preserveRetry = true, notifyPeer = false)
                                 dialog = null
                                 message = "La sesión con el PC terminó o se perdió la conexión. Genera otro QR en el PC y escanéalo para reconectar. Los archivos guardados se conservan."
@@ -545,7 +605,12 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }, 0, 2, java.util.concurrent.TimeUnit.SECONDS) }
-                onDispose { disposed.set(true); task?.cancel(false); pollClient?.interrupt() }
+                val dispose = { disposed.set(true); task?.cancel(false); pollClient?.interrupt(); Unit }
+                session.disposePoll = dispose
+                onDispose {
+                    // An active service still needs the heartbeat if Android discards the UI.
+                    if (!(ActiveTransfer.running && backgroundSession === session)) dispose()
+                }
             }
             BackHandler(enabled = pair != null && dialog == null) { disconnectSession(); this@MainActivity.finish() }
             fun receiveFile(c: ProtocolClient, selected: Transfer, accept: Boolean): Boolean {
@@ -884,7 +949,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        if (!isChangingConfigurations) {
+        if (session.uiOwner === this) session.uiOwner = null
+        if (!isChangingConfigurations && !(ActiveTransfer.running && backgroundSession === session)) {
             disconnectSession()
             worker.shutdownNow()
             session.poller.shutdownNow()
