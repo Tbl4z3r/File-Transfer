@@ -198,7 +198,7 @@ class CoreInteropTest {
             val vacantOffer = requireNotNull(c.inbox().batch)
             assertEquals(listOf("Otra vacía"), vacantOffer.directories)
             assertTrue(vacantOffer.files.isEmpty())
-            assertEquals("completed", c.acceptDownloadBatch(vacantOffer.id).state)
+            assertEquals("completed", c.acceptDownloadBatch(vacantOffer.id, empty = true).state)
 
             c.disconnect()
             val expired = runCatching { c.inbox() }.exceptionOrNull() as ProtocolException
