@@ -125,9 +125,9 @@ data class Transfer(val id: String, val direction: String, val name: String, val
     } }
 }
 
-data class UploadFile(val name: String, val size: Long) {
-    init { require(Validation.name(name)); Validation.size(size.toString()) }
-    internal fun json() = JSONObject().put("file_name", name).put("size_bytes", size.toString())
+data class UploadFile(val name: String, val size: Long, val relativePath: String? = null) {
+    init { require(Validation.name(name)); Validation.size(size.toString()); require(relativePath == null || validRelativePath(relativePath) && relativePath.substringAfterLast('/') == name) }
+    internal fun json() = JSONObject().put("file_name", name).put("size_bytes", size.toString()).apply { relativePath?.let { put("relative_path", it) } }
 }
 
 data class UploadBatch(val id: String, val state: String) {
@@ -142,25 +142,30 @@ data class UploadBatch(val id: String, val state: String) {
 }
 
 /** Validate the encoded JSON, including escaping, before opening a connection. */
-internal fun uploadManifest(files: List<UploadFile>): JSONObject {
-    require(files.size in 2..64) { "Selecciona entre 2 y 64 archivos para el lote." }
-    val body = JSONObject().put("files", JSONArray().also { a -> files.forEach { a.put(it.json()) } })
+internal fun uploadManifest(files: List<UploadFile>, directories: List<String> = emptyList()): JSONObject {
+    validateFolderManifest(files, directories)
+    val body = JSONObject().put("files", JSONArray().also { a -> files.forEach { a.put(it.json()) } }).apply { if (directories.isNotEmpty()) put("directories", JSONArray(directories)) }
     require(body.toString().toByteArray(Charsets.UTF_8).size <= 16384) { "Los nombres del lote superan el límite permitido." }
     return body
 }
 
-data class DownloadOfferBatch(val id: String, val files: List<UploadFile>) {
+data class DownloadOfferBatch(val id: String, val files: List<UploadFile>, val directories: List<String> = emptyList()) {
     companion object {
         fun parse(o: JSONObject): DownloadOfferBatch {
-            require(o.keys().asSequence().toSet() == setOf("batch_id", "files"))
+            require(o.keys().asSequence().toSet() in listOf(setOf("batch_id", "files"), setOf("batch_id", "files", "directories")))
             val id = o.text("batch_id"); require(Validation.id(id))
-            val a = o.getJSONArray("files"); require(a.length() in 2..64)
+            val dirs = if (o.has("directories")) o.getJSONArray("directories").let { a ->
+                require(a.length() in 1..64)
+                (0 until a.length()).map { require(a.get(it) is String); a.getString(it) }
+            } else emptyList()
+            val a = o.getJSONArray("files"); require(a.length() <= 64)
             val files = (0 until a.length()).map { index ->
                 val f = a.getJSONObject(index)
-                require(f.keys().asSequence().toSet() == setOf("file_name", "size_bytes"))
-                UploadFile(f.text("file_name"), Validation.size(f.text("size_bytes")))
+                require(f.keys().asSequence().toSet() in listOf(setOf("file_name", "size_bytes"), setOf("file_name", "size_bytes", "relative_path")))
+                UploadFile(f.text("file_name"), Validation.size(f.text("size_bytes")), if (f.has("relative_path")) f.text("relative_path") else null)
             }
-            return DownloadOfferBatch(id, files)
+            validateFolderManifest(files, dirs)
+            return DownloadOfferBatch(id, files, dirs)
         }
     }
 }
@@ -208,7 +213,7 @@ class ProtocolClient(private val host: String, private val port: Int, pin: Strin
     fun interrupt() { activeCall?.cancel() }
     private fun req(path: String, method: String = "GET", body: RequestBody? = null, auth: Boolean = true): Response {
         val b = Request.Builder().url("https://file-transfer.local:$port/v1/$path").method(method, body).header("Accept-Encoding", "identity")
-        if (path == "pair" && method == "POST") b.header("X-FT-Inbox", "v1")
+        if (path == "pair" && method == "POST") b.header("X-FT-Inbox", "v1").header("X-FT-Folders", "v1")
         if (auth) { b.header("X-Device-Id", deviceId); b.header("Authorization", "Bearer ${requireNotNull(credential)}") }
         val call = client.newCall(b.build()); activeCall = call
         return call.execute()
@@ -232,7 +237,19 @@ class ProtocolClient(private val host: String, private val port: Int, pin: Strin
     }
     fun createUpload(name: String, size: Long): Transfer { require(Validation.name(name)); Validation.size(size.toString()); return Transfer.parse(json("transfers", "POST", JSONObject().put("file_name", name).put("size_bytes", size.toString()))) }
     private fun batchPath(id: String): String { require(Validation.id(id)); return "upload-batches/$id" }
-    fun createUploadBatch(files: List<UploadFile>) = UploadBatch.parse(json("upload-batches", "POST", uploadManifest(files)))
+    fun createUploadBatch(files: List<UploadFile>, directories: List<String> = emptyList()): UploadBatch {
+        val manifest = uploadManifest(files, directories)
+        if (directories.isNotEmpty()) {
+            val support = try { json("folder-support") } catch (error: ProtocolException) {
+                if (error.status == 404 && error.code == "not_found") throw SendSelectionException("Actualiza File Transfer en el PC para enviar carpetas.")
+                throw error
+            }
+            require(support.keys().asSequence().toSet() == setOf("folders"))
+            if (support.get("folders") == false) throw SendSelectionException("El PC no admite carpetas. Actualiza File Transfer en el PC.")
+            require(support.get("folders") == true)
+        }
+        return UploadBatch.parse(json("upload-batches", "POST", manifest))
+    }
     fun batchStatus(id: String) = UploadBatch.parse(json(batchPath(id))).also { require(it.id == id) }
     fun startBatchFile(id: String, index: Int): Transfer {
         require(index in 0..63)
@@ -247,7 +264,7 @@ class ProtocolClient(private val host: String, private val port: Int, pin: Strin
     }
     private fun downloadBatchPath(id: String): String { require(Validation.id(id)); return "download-batches/$id" }
     fun downloadBatchStatus(id: String) = UploadBatch.parse(json(downloadBatchPath(id))).also { require(it.id == id) }
-    fun acceptDownloadBatch(id: String) = UploadBatch.parse(json("${downloadBatchPath(id)}/accept", "POST", JSONObject())).also { require(it.id == id && it.state == "accepted") }
+    fun acceptDownloadBatch(id: String, empty: Boolean = false) = UploadBatch.parse(json("${downloadBatchPath(id)}/accept", "POST", JSONObject())).also { require(it.id == id && it.state == if (empty) "completed" else "accepted") }
     fun startDownloadBatchFile(id: String, index: Int): Transfer {
         require(index in 0..63)
         return Transfer.parse(json("${downloadBatchPath(id)}/start", "POST", JSONObject().put("index", index)))

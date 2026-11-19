@@ -17,7 +17,7 @@ Estado: implementación para revisión de GPT-6.2; rama `task/cola-android`, bas
 Comandos con `source /workspace/toolchains/env.sh`, cache Gradle existente y `--offline --no-daemon --max-workers=1`:
 
 - `:app:testDebugUnitTest`: 60 pruebas, 59 correctas, 1 omitida (`CoreInteropTest`, sin `FT_CORE_BINARY`), 0 fallos/errores.
-- `:app:lintDebug`: ejecución previa correcta (14 advertencias, 0 errores); una corrida final con la fuente congelada está en curso junto con `:app:assembleDebug` al entregar el commit. La compilación Kotlin final y las pruebas JVM de esa misma corrida ya terminaron correctamente. No se acredita APK hasta ver el resultado de assemble.
+- `:app:lintDebug` y `:app:assembleDebug`: corrida final correcta, `BUILD SUCCESSFUL in 4m 12s` (14 advertencias de lint, 0 errores). APK debug generado en `apps/android/app/build/outputs/apk/debug/app-debug.apk` del worktree de cola. Esta evidencia se añadió al informe durante la fase posterior de carpetas, sin cambiar el código de cola ya revisado.
 - Avisos de entorno: métricas Android no disponibles bajo `/home/agent/.android` y uso heredado de retención no configurable, sin fallo de compilación.
 - `git diff --check`: correcto.
 - Nuevas pruebas JVM: snapshot accesible al perder permiso del origen y tras restaurar; armado por entrada; selección automática limitada al peer; peer persistido; incertidumbre persistida; cancelación/fallo revierte selección; huérfanos y snapshot ausente; escritura fallida de journal sin perder cola; buffer <=64 KiB/archivo vacío; nombres inválidos y máximo 64 sin abrir fuentes. Progreso de lote evita contar dos veces el último archivo confirmado.

@@ -126,7 +126,7 @@ private fun SectionTitle(text: String) {
 internal fun EsencialScreen(
     pairedName: String?, pairedHost: String?, deviceName: String, destination: String, busy: Boolean, busyLabel: String, cancellable: Boolean, message: String,
     transfer: TransferPresentation?, sendQueue: SendQueueProgress?, offer: Transfer?, batchOffer: DownloadOfferBatch?, activity: List<TransferPresentation>,
-    outgoing: OutgoingState, queuedForOtherPeer: Boolean, onSendOutgoing: () -> Unit, onHoldOutgoing: () -> Unit, onRemoveOutgoing: (OutgoingFile) -> Unit,
+    outgoing: OutgoingState, queuedForOtherPeer: Boolean, onChooseOutgoingFolder: () -> Unit, onRemoveOutgoingFolder: (OutgoingFolder) -> Unit, onSendOutgoing: () -> Unit, onHoldOutgoing: () -> Unit, onRemoveOutgoing: (OutgoingFile) -> Unit,
     hasPending: Boolean, canRetrySend: Boolean, canRetryInbox: Boolean,
     onSettings: () -> Unit, onEditName: () -> Unit, onScan: () -> Unit, onFolder: () -> Unit,
     onSend: () -> Unit, onReceive: () -> Unit, onAccept: () -> Unit, onDetail: () -> Unit, onDecline: () -> Unit,
@@ -175,17 +175,23 @@ internal fun EsencialScreen(
                                 ActionTile("Bandeja del PC", "receive", false, enabled, Modifier.weight(1f), onReceive)
                             }
                         }
+                        OutlinedButton(onClick = onChooseOutgoingFolder, enabled = !busy && !hasPending && offer == null && batchOffer == null, modifier = Modifier.fillMaxWidth()) { Text("Elegir carpeta para enviar") }
                     }
                 }
-                if (outgoing.files.isNotEmpty()) {
+                if (outgoing.files.isNotEmpty() || outgoing.folders.isNotEmpty()) {
                     Surface(shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, colors.outlineVariant)) {
                         Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             SectionTitle("Cola de envío · ${outgoing.files.size} archivos")
+                            outgoing.folders.forEach { folder ->
+                                FileRow(folder.directories.first(), "${folder.directories.size} carpetas · " + when { folder.uncertain -> "Sin confirmar; comprueba el destino"; folder.armed -> "Preparada para enviar"; else -> "En espera" }, "folder")
+                                folder.directories.drop(1).forEach { path -> Text(path, style = MaterialTheme.typography.bodySmall) }
+                                TextButton(onClick = { onRemoveOutgoingFolder(folder) }, enabled = !busy && !hasPending) { Text("Eliminar carpeta de la cola") }
+                            }
                             Text(when { queuedForOtherPeer -> "Hay archivos preparados para otro PC. Pulsa Enviar cola para elegir este PC."; outgoing.armed -> "Preparada para enviar al conectar con el PC y abrir esta pantalla."; else -> "En espera · se conserva al cerrar la aplicación." }, style = MaterialTheme.typography.bodySmall)
                             outgoing.files.forEach { entry ->
                                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                     Column(Modifier.weight(1f)) {
-                                        Text(entry.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(entry.relativePath ?: entry.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         Text(formatBytes(entry.size) + when { entry.uncertain -> " · Sin confirmar; comprueba el PC"; entry.armed -> " · Preparado para enviar"; else -> " · En espera" }, style = MaterialTheme.typography.bodySmall)
                                     }
                                     TextButton(onClick = { onRemoveOutgoing(entry) }, enabled = !busy && !hasPending) { Text("Eliminar") }
@@ -206,6 +212,7 @@ internal fun EsencialScreen(
                             Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 if (sendQueue != null) {
                                     val status = when {
+                                        sendQueue.total == 0 -> if (sendQueue.running) "Esperando autorización de carpetas" else "Preparación de carpetas terminada; consulta el resultado"
                                         sendQueue.completed == sendQueue.total -> "Lote completado"
                                         sendQueue.running && sendQueue.current == 0 -> "Esperando aceptación del lote"
                                         sendQueue.running -> "Archivo ${sendQueue.current} de ${sendQueue.total}"
@@ -218,7 +225,7 @@ internal fun EsencialScreen(
                                 when {
                                     batchOffer != null -> {
                                         Column(Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
-                                            FileRow("${batchOffer.files.size} archivos del PC", "${formatBytes(batchOffer.files.sumOf { it.size })} · Pendiente de tu aceptación")
+                                            FileRow(if (batchOffer.directories.isEmpty()) "${batchOffer.files.size} archivos del PC" else "${batchOffer.directories.size} carpetas · ${batchOffer.files.size} archivos del PC", "${formatBytes(batchOffer.files.sumOf { it.size })} · Pendiente de tu aceptación")
                                         }
                                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                             OutlinedButton(onClick = onDecline, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Rechazar") }

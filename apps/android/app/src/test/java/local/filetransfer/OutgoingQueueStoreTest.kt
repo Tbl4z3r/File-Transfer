@@ -154,4 +154,50 @@ class OutgoingQueueStoreTest {
             assertTrue(store.state.files.isEmpty())
         }
     }
+    @Test fun folderSnapshotsAndEmptyDirectoriesSurviveRestoreAndAttemptCannotReplay() {
+        val root = temporary.newFolder()
+        val store = OutgoingQueueStore(root)
+        val dirs = listOf("Root", "Root/Sub", "Root/Empty")
+        store.importFiles(listOf(OutgoingSource("x.txt", "Root/Sub/x.txt") { ByteArrayInputStream(byteArrayOf(1)) }), true, directories = dirs) { false }
+        val restored = OutgoingQueueStore(root)
+        assertEquals(dirs, restored.state.folders.single().directories)
+        assertEquals("Root/Sub/x.txt", restored.state.files.single().relativePath)
+        val folder = restored.state.folders.single()
+        val peer = RetryPeer("12345678-1234-4234-8234-123456789abc", "a".repeat(64))
+        restored.attempt(restored.state.files.map { it.id }.toSet(), peer, setOf(folder.id))
+        restored.arm(true)
+        assertTrue(restored.state.folders.single().uncertain)
+        assertTrue(restored.state.automaticFiles(peer).isEmpty())
+        assertTrue(restored.state.automaticFolders(peer).isEmpty())
+        restored.remove(restored.state.files.single().id)
+        assertEquals(dirs, OutgoingQueueStore(root).state.folders.single().directories)
+        restored.removeFolder(folder.id)
+        assertTrue(restored.state.folders.isEmpty())
+    }
+
+    @Test fun emptyFolderIsAQueuedSelectionWithoutAnySourceStream() {
+        val root = temporary.newFolder()
+        val store = OutgoingQueueStore(root)
+        store.importFiles(emptyList(), false, directories = listOf("Empty")) { false }
+        assertTrue(store.state.files.isEmpty())
+        assertEquals(listOf("Empty"), OutgoingQueueStore(root).state.folders.single().directories)
+    }
+
+    @Test fun dispatchUsesOneManifestPerFolderSelectionAndSplitsOversizedLooseNames() {
+        val store = OutgoingQueueStore(temporary.newFolder())
+        repeat(2) { store.importFiles(listOf(OutgoingSource("x", "Root/x") { ByteArrayInputStream(byteArrayOf()) }), true, directories = listOf("Root", "Root/Empty")) { false } }
+        val groups = outgoingDispatches(store.state.files, store.state.folders)
+        assertEquals(2, groups.size)
+        groups.forEach { group ->
+            assertEquals(1, group.folderIds.size)
+            val folder = store.state.folders.single { it.id in group.folderIds }
+            uploadManifest(store.state.files.filter { it.id in group.fileIds }.map { UploadFile(it.name, it.size, it.relativePath) }, folder.directories)
+        }
+        val loose = List(64) { OutgoingFile("id$it", "\u2028".repeat(60), 0) }
+        val split = outgoingDispatches(loose, emptyList())
+        assertTrue(split.size > 1)
+        assertEquals(64, split.sumOf { it.fileIds.size })
+        split.forEach { group -> if (group.fileIds.size > 1) uploadManifest(loose.filter { it.id in group.fileIds }.map { UploadFile(it.name, it.size) }) }
+    }
+
 }
