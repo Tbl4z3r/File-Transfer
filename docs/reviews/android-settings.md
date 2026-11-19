@@ -6,6 +6,7 @@ Windows 0.1.8 ofrece **Copiar código** en la ventana del QR. Si el portapapeles
 
 ## Comprobaciones
 
+- Android, JVM y APK de depuración. `./gradlew --offline --no-daemon :app:testDebugUnitTest :app:assembleDebug` compiló el APK y pasó 41 pruebas, incluidas validación canónica, límites del nombre, saneamiento y TLS. La prueba opcional con el core se omitió en esta ejecución de la rama porque requiere `FT_CORE_BINARY`.
 - Windows, frontend en Linux con adaptador DOM/IPC. `npm run test:ui` pasó 61 pruebas, incluidos el vector binario compartido, la copia de ambos formatos, la selección alternativa y la limpieza de la ventana.
 - Interoperabilidad de imagen. `python3 scripts/integration/verify_pairing_qr.py` recuperó con ZXing el JSON exacto del GIF generado por Windows y confirmó el margen.
 - Pendiente en hardware. Comprobar nombre después de reiniciar la aplicación, teclado y Atrás en Ajustes, copia nativa del código, conexión por cada formato y copia del diagnóstico tras un error. Contrastar en Windows y Android (incluido Galaxy J4+).
