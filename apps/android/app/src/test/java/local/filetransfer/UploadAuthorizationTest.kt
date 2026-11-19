@@ -110,4 +110,38 @@ class UploadAuthorizationTest {
         }
         assertEquals(8, server.requestCount)
     }
+    @Test fun folderManifestChecksCapabilityAndNeverFallsBack() = withServer { server, client ->
+        val nested = listOf(UploadFile("uno.bin", 3, "Root/uno.bin"))
+        for ((status, body) in listOf(404 to "{\"error\":{\"code\":\"not_found\"}}", 200 to "{\"folders\":false}", 401 to "{\"error\":{\"code\":\"unauthorized\"}}")) {
+            server.enqueue(response(body, status))
+            assertTrue(runCatching { UploadAuthorization(client, nested, listOf("Root")).request({ false }, {}) }.isFailure)
+            assertEquals("/v1/folder-support", server.takeRequest().url.encodedPath)
+        }
+        assertEquals(3, server.requestCount)
+        server.enqueue(response("{\"folders\":true}"))
+        server.enqueue(response("{\"error\":{\"code\":\"not_found\"}}", 404))
+        assertTrue(runCatching { UploadAuthorization(client, nested, listOf("Root")).request({ false }, {}) }.exceptionOrNull() is ProtocolException)
+        assertEquals("/v1/folder-support", server.takeRequest().url.encodedPath)
+        assertEquals("/v1/upload-batches", server.takeRequest().url.encodedPath)
+        assertEquals(5, server.requestCount)
+    }
+
+    @Test fun oneNestedFileAndEmptyFoldersUseBatchAuthorization() = withServer { server, client ->
+        server.enqueue(response("{\"folders\":true}")); server.enqueue(response(batch(), 201)); server.enqueue(response(transfer()))
+        val nested = UploadAuthorization(client, listOf(UploadFile("uno.bin", 3, "Root/uno.bin")), listOf("Root", "Root/Empty"))
+        nested.request({ false }, {}); nested.start(0) { false }
+        assertEquals("/v1/folder-support", server.takeRequest().url.encodedPath)
+        val create = server.takeRequest()
+        val manifest = org.json.JSONObject(create.body!!.utf8())
+        assertEquals("Root/uno.bin", manifest.getJSONArray("files").getJSONObject(0).getString("relative_path"))
+        assertEquals(2, manifest.getJSONArray("directories").length())
+        assertEquals("/v1/upload-batches/$batchId/start", server.takeRequest().url.encodedPath)
+        server.enqueue(response("{\"folders\":true}")); server.enqueue(response(batch("completed"), 201))
+        UploadAuthorization(client, emptyList(), listOf("Empty")).request({ false }, {})
+        assertEquals(5, server.requestCount)
+        server.takeRequest(); server.takeRequest()
+        server.enqueue(response(batch("completed")))
+        assertEquals("completed", client.acceptDownloadBatch(batchId, empty = true).state)
+    }
+
 }

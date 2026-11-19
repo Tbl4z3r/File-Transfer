@@ -11,7 +11,7 @@ import java.io.IOException
 
 class ReceiveStorageException(val code: String, message: String, cause: Throwable? = null) : IOException(message, cause)
 data class ReceivedDocument(val uri: Uri, val name: String, val location: ReceiveLocation)
-data class ReceiveLocation(val tree: Uri?, val label: String)
+data class ReceiveLocation(val tree: Uri?, val label: String, val directory: Uri? = null, val privatePath: String? = null)
 data class ReceiveFolderEntry(val uri: Uri, val name: String, val isDirectory: Boolean)
 
 /** App-private staging keeps unverified bytes out of the selected provider. */
@@ -65,10 +65,11 @@ class ReceiveStorage(private val context: Context) {
     fun listFolder(location: ReceiveLocation, folder: Uri?): List<ReceiveFolderEntry> {
         val tree = location.tree
         val entries = if (tree == null) {
-            privateInbox().listFiles().orEmpty().filter(File::isFile)
-                .map { ReceiveFolderEntry(privateUri(it), it.name, false) }
+            val parent = if (folder == null) privateDirectory(location.privatePath) else privateFileFromUri(folder)
+            parent.listFiles().orEmpty().filterNot { java.nio.file.Files.isSymbolicLink(it.toPath()) }
+                .map { ReceiveFolderEntry(privateUri(it), it.name, it.isDirectory) }
         } else {
-            val parent = folder ?: directory(tree)
+            val parent = folder ?: location.directory ?: directory(tree)
             val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(parent))
             val columns = arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                 DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE)
@@ -83,6 +84,86 @@ class ReceiveStorage(private val context: Context) {
             } ?: throw IOException("No se pudo leer la carpeta")
         }
         return entries.sortedWith(compareBy<ReceiveFolderEntry> { !it.isDirectory }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+    }
+
+    private fun checkedCreated(tree: Uri, created: Uri): Uri {
+        require(created.scheme == "content" && created.authority == tree.authority)
+        require(!DocumentsContract.isTreeUri(created) || DocumentsContract.getTreeDocumentId(created) == DocumentsContract.getTreeDocumentId(tree))
+        return DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getDocumentId(created))
+    }
+
+    private fun privateDirectory(path: String?): File {
+        val root = privateInbox()
+        if (path == null) return root
+        require(path.split('/').all(Validation::name))
+        var target = root
+        path.split('/').forEach { part ->
+            target = File(target, part)
+            require(!java.nio.file.Files.isSymbolicLink(target.toPath()) && target.isDirectory)
+        }
+        require(target.canonicalPath.startsWith(root.canonicalPath + File.separator))
+        return target
+    }
+
+    private fun privateFileFromUri(uri: Uri): File {
+        require(uri.authority == "${context.packageName}.inbox" && uri.pathSegments.firstOrNull() == "inbox")
+        return privateDirectory(uri.pathSegments.drop(1).joinToString("/").takeIf { it.isNotEmpty() })
+    }
+
+    /** Create each root exclusively. Only IDs/paths created for this manifest are reused below it. */
+    fun prepareFolders(paths: List<String>, cancelled: () -> Boolean): Map<String, ReceiveLocation> {
+        if (paths.isEmpty()) return emptyMap()
+        validateFolderManifest(emptyList(), paths)
+        validateDestination()
+        val tree = selectedTree()
+        if (tree == null) return PrivateFolderPlan.prepare(privateInbox(), paths, cancelled).mapValues { (_, target) ->
+            val relative = target.relativeTo(privateInbox()).invariantSeparatorsPath
+            ReceiveLocation(null, "Bandeja privada / $relative", privatePath = relative)
+        }
+        val locations = LinkedHashMap<String, ReceiveLocation>()
+        val ownedDocuments = mutableListOf<Uri>()
+        val knownIds = HashSet<String>()
+        try {
+            for (path in paths.sortedBy { it.count { c -> c == '/' } }) {
+                check(!cancelled()) { "Cancelada" }
+                val parentPath = path.substringBeforeLast('/', "")
+                val parentLocation = if (parentPath.isEmpty()) null else checkNotNull(locations[parentPath])
+                val requestedName = path.substringAfterLast('/')
+                val parent = parentLocation?.directory ?: directory(tree)
+                knownIds += DocumentsContract.getDocumentId(parent)
+                val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(parent))
+                val names = HashSet<String>()
+                resolver.query(children, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { cursor ->
+                    while (cursor.moveToNext()) {
+                        check(!cancelled()) { "Cancelada" }
+                        knownIds += cursor.getString(0)
+                        names += cursor.getString(1).lowercase(java.util.Locale.ROOT)
+                    }
+                } ?: throw IOException("No se pudo leer el destino")
+                var n = 0
+                var candidate = requestedName
+                while (candidate.lowercase(java.util.Locale.ROOT) in names) {
+                    if (++n > 10_000) throw IOException("No hay un nombre de carpeta disponible")
+                    candidate = numberedFolderName(requestedName, n)
+                }
+                val created = DocumentsContract.createDocument(resolver, parent, DocumentsContract.Document.MIME_TYPE_DIR, candidate)
+                    ?.let { checkedCreated(tree, it) } ?: throw IOException("No se pudo crear la carpeta")
+                val id = DocumentsContract.getDocumentId(created)
+                if (!knownIds.add(id)) throw ReceiveStorageException("destination_collision", "El proveedor devolvió una carpeta existente. Elige otro destino.")
+                ownedDocuments += created
+                val actualName = resolver.query(created, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE), null, null, null)?.use {
+                    check(it.moveToFirst() && it.getString(1) == DocumentsContract.Document.MIME_TYPE_DIR)
+                    it.getString(0)
+                } ?: throw IOException("No se pudo comprobar la carpeta nueva")
+                locations[path] = ReceiveLocation(tree, (parentLocation?.label ?: destinationLabel()) + " / " + actualName, created)
+            }
+            return locations
+        } catch (error: Exception) {
+            var cleaned = true
+            ownedDocuments.asReversed().forEach { if (!runCatching { DocumentsContract.deleteDocument(resolver, it) }.getOrDefault(false)) cleaned = false }
+            if (!cleaned) throw ReceiveStorageException("destination_cleanup", "No se pudieron preparar todas las carpetas ni retirar algunas vacías. Revisa el destino.", error)
+            throw error
+        }
     }
 
     private fun validateTree(tree: Uri): String {
@@ -103,18 +184,20 @@ class ReceiveStorage(private val context: Context) {
         }
     }
 
-    fun publish(source: File, requestedName: String, size: Long, hash: String, cancelled: () -> Boolean): ReceivedDocument {
+    fun publish(source: File, requestedName: String, size: Long, hash: String, location: ReceiveLocation? = null, cancelled: () -> Boolean): ReceivedDocument {
         require(Validation.name(requestedName))
-        val tree = selectedTree()
+        val tree = if (location == null) selectedTree() else location.tree
         if (tree == null) {
-            val inbox = privateInbox().apply { check(isDirectory || mkdirs()) }
+            val inbox = if (location == null) privateInbox().apply { check(isDirectory || mkdirs()) } else privateDirectory(location.privatePath)
             val target = PrivateInboxPublisher.publish(source, inbox, requestedName, size, hash, cancelled)
-            return ReceivedDocument(privateUri(target), target.name, ReceiveLocation(null, "Bandeja privada de la aplicación"))
+            return ReceivedDocument(privateUri(target), target.name, (location ?: ReceiveLocation(null, "Bandeja privada de la aplicación")))
         }
-        val folderLabel = validateTree(tree)
+        val folderLabel = location?.label ?: validateTree(tree)
+        validateTree(tree)
+        val parent = location?.directory ?: directory(tree)
         val names = HashSet<String>()
-        val existingIds = HashSet<String>()
-        val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+        val existingIds = hashSetOf(DocumentsContract.getDocumentId(parent))
+        val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(parent))
         val cursor = resolver.query(children, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)
             ?: throw ReceiveStorageException("destination_unavailable", "No se pudo leer la carpeta elegida. Vuelve a elegirla.")
         cursor.use {
@@ -133,8 +216,8 @@ class ReceiveStorage(private val context: Context) {
         }
         val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(requestedName.substringAfterLast('.', "").lowercase(java.util.Locale.ROOT)) ?: "application/octet-stream"
         if (cancelled()) throw java.io.InterruptedIOException("cancelled")
-        val created = DocumentsContract.createDocument(resolver, directory(tree), mime, candidate)
-            ?: throw ReceiveStorageException("destination_create", "No se pudo crear el archivo en la carpeta elegida.")
+        val created = DocumentsContract.createDocument(resolver, parent, mime, candidate)
+            ?.let { checkedCreated(tree, it) } ?: throw ReceiveStorageException("destination_create", "No se pudo crear el archivo en la carpeta elegida.")
         // Some providers rename on collision. Never reopen a document found by name, and refuse a returned existing ID.
         if (DocumentsContract.getDocumentId(created) in existingIds) {
             throw ReceiveStorageException("destination_collision", "El proveedor devolvió un archivo existente. No se modificó; elige otra carpeta.")
@@ -144,7 +227,7 @@ class ReceiveStorage(private val context: Context) {
                 ?: throw ReceiveStorageException("destination_write", "No se pudo abrir el archivo nuevo para guardar.")
             output.use { VerifiedCopy.copy(source, it, size, hash, cancelled) }
             val actualName = resolver.query(created, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { if (it.moveToFirst()) it.getString(0) else null } ?: candidate
-            return ReceivedDocument(created, actualName, ReceiveLocation(tree, folderLabel))
+            return ReceivedDocument(created, actualName, ReceiveLocation(tree, folderLabel, parent))
         } catch (error: Exception) {
             // Delete only the document created by this operation. Providers may refuse cleanup; expose that case.
             val cleaned = runCatching { DocumentsContract.deleteDocument(resolver, created) }.getOrDefault(false)

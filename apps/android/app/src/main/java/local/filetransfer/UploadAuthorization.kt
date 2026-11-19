@@ -1,18 +1,18 @@
 package local.filetransfer
 
 /** One session, one create attempt; only an authenticated old-server 404 enables legacy mode. */
-internal class UploadAuthorization(private val client: ProtocolClient, private val files: List<UploadFile>) {
+internal class UploadAuthorization(private val client: ProtocolClient, private val files: List<UploadFile>, private val directories: List<String> = emptyList()) {
     var batchId: String? = null
         private set
 
     fun request(cancelled: () -> Boolean, waiting: () -> Unit) {
-        require(files.isNotEmpty() && files.size <= 64)
-        if (files.size > 1) uploadManifest(files)
+        require((files.isNotEmpty() || directories.isNotEmpty()) && files.size <= 64)
+        if (files.size > 1 || directories.isNotEmpty()) uploadManifest(files, directories)
         check(!cancelled()) { "Cancelada" }
-        if (files.size == 1) return
-        var batch = try { client.createUploadBatch(files) }
+        if (files.size == 1 && directories.isEmpty()) return
+        var batch = try { client.createUploadBatch(files, directories) }
         catch (error: ProtocolException) {
-            if (error.status == 404 && error.code == "not_found") return
+            if (directories.isEmpty() && error.status == 404 && error.code == "not_found") return
             throw error
         }
         batchId = batch.id
@@ -26,7 +26,7 @@ internal class UploadAuthorization(private val client: ProtocolClient, private v
             batch = client.batchStatus(batch.id)
         }
         check(!cancelled()) { "Cancelada" }
-        check(batch.state == "accepted") { "El PC terminó o rechazó el lote." }
+        check(batch.state == if (files.isEmpty()) "completed" else "accepted") { "El PC terminó o rechazó el lote." }
     }
 
     fun start(index: Int, cancelled: () -> Boolean): Transfer {

@@ -73,6 +73,7 @@ class MainActivity : ComponentActivity() {
         val outgoing = mutableStateOf(OutgoingState())
         val shared = mutableStateOf(listOf<SharedSelection>())
         val visible = mutableStateOf(false)
+        val manualDispatch = mutableStateOf(emptyList<OutgoingDispatch>())
 
         fun record(entry: TransferPresentation) {
             activity.value = (activity.value.filterNot { entry.id != null && it.id == entry.id } + entry).takeLast(32)
@@ -129,7 +130,11 @@ class MainActivity : ComponentActivity() {
 
     private fun disconnectSession(preserveRetry: Boolean = false, notifyPeer: Boolean = true) {
         val p = session.pair.value
+        if (session.manualDispatch.value.isNotEmpty() || session.busy.value && operationStage == "send") {
+            runCatching { session.outgoingStore?.arm(false); session.outgoingStore?.let { session.outgoing.value = it.state } }
+        }
         session.generation++
+        session.manualDispatch.value = emptyList()
         session.disposePoll?.invoke()
         session.disposePoll = null
         ActiveTransfer.currentId?.let { ActiveTransfer.finish(applicationContext, it) }
@@ -218,7 +223,9 @@ class MainActivity : ComponentActivity() {
             val outgoing by remember { session.outgoing }
             val visible by remember { session.visible }
             val shared by remember { session.shared }
+            val manualDispatch by remember { session.manualDispatch }
             var selectedFiles by remember { mutableStateOf<List<Uri>>(emptyList()) }
+            var selectedFolder by remember { mutableStateOf<Uri?>(null) }
             val outgoingStore = checkNotNull(session.outgoingStore)
             fun queueUri(entry: OutgoingFile) = Uri.fromFile(outgoingStore.file(entry))
             fun queued(uri: Uri) = outgoingStore.state.files.find { queueUri(it) == uri }
@@ -234,7 +241,18 @@ class MainActivity : ComponentActivity() {
                 if (!changeOutgoing { outgoingStore.remove(entry.id) }) return false
                 uploadRetry = uploadRetry?.let { retry ->
                     retry.copy(remaining = retry.remaining - queueUri(entry), uncertain = retry.uncertain?.takeUnless { it == queueUri(entry) })
-                }?.takeIf { it.remaining.isNotEmpty() }
+                }?.takeIf { it.remaining.isNotEmpty() || it.folders.isNotEmpty() }
+                session.manualDispatch.value = session.manualDispatch.value.map { it.copy(fileIds = it.fileIds - entry.id) }
+                    .filter { it.fileIds.isNotEmpty() || it.folderIds.isNotEmpty() }
+                return true
+            }
+            fun removeOutgoingFolder(folder: OutgoingFolder): Boolean {
+                val removed = outgoingStore.state.files.filter { it.folderId == folder.id }.map(::queueUri).toSet()
+                if (!changeOutgoing { outgoingStore.removeFolder(folder.id) }) return false
+                uploadRetry = uploadRetry?.let {
+                    it.copy(remaining = it.remaining.filterNot { uri -> uri in removed }, uncertain = it.uncertain?.takeUnless { uri -> uri in removed }, folders = it.folders - folder.id)
+                }?.takeIf { it.remaining.isNotEmpty() || it.folders.isNotEmpty() }
+                session.manualDispatch.value = session.manualDispatch.value.filterNot { folder.id in it.folderIds }
                 return true
             }
             var dialog by remember { mutableStateOf<String?>(null) }
@@ -277,7 +295,7 @@ class MainActivity : ComponentActivity() {
 
             fun openLocation(location: ReceiveLocation) {
                 if (location.tree != null && runCatching {
-                        val directory = receiveStorage.directory(location.tree)
+                        val directory = location.directory ?: receiveStorage.directory(location.tree)
                         startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(directory, DocumentsContract.Document.MIME_TYPE_DIR)
                             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             .apply { clipData = ClipData.newRawUri("Carpeta de recepción", directory) })
@@ -359,6 +377,10 @@ class MainActivity : ComponentActivity() {
                     }, failed = { error ->
                         backgroundSession = null
                         busy = false
+                        if (stage == "send") {
+                            session.manualDispatch.value = emptyList()
+                            changeOutgoing { outgoingStore.arm(false) }
+                        }
                         diagnostic = TransferDiagnostics.describe(stage, error)
                         message = "No se pudo iniciar la transferencia en segundo plano. Vuelve a intentarlo con la aplicación abierta."
                     })
@@ -481,18 +503,19 @@ class MainActivity : ComponentActivity() {
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
                         Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION))
             }
-            fun startUpload(uris: List<Uri>, uncertain: Uri? = null, requiredPeer: RetryPeer? = null) {
+            fun startUpload(uris: List<Uri>, uncertain: Uri? = null, requiredPeer: RetryPeer? = null, folderIds: List<String> = emptyList()) {
                 val peer = pair?.retryPeer() ?: return
                 if (requiredPeer != null && requiredPeer != peer) return
-                if (uris.isNotEmpty() && !busy && pending == null && offer == null && batchOffer == null) {
-                    if (!changeOutgoing { outgoingStore.attempt(uris.mapNotNull { queued(it)?.id }.toSet(), peer) }) return
-                    uploadRetry = UploadRetry(peer, uris.distinct(), uncertain)
+                if ((uris.isNotEmpty() || folderIds.isNotEmpty()) && !busy && pending == null && offer == null && batchOffer == null) {
+                    if (!changeOutgoing { outgoingStore.attempt(uris.mapNotNull { queued(it)?.id }.toSet(), peer, folderIds.toSet()) }) { session.manualDispatch.value = emptyList(); return }
+                    uploadRetry = UploadRetry(peer, uris.distinct(), uncertain, folderIds)
                     inboxRetry = null
                     transfer = null
                     sendQueue = null
                     // Persist before dispatch: process recreation never automatically replays an attempt.
                     post("send", transferOperation = true) {
                         val selected = uris.distinct()
+                        val directories = outgoingStore.state.folders.filter { it.id in folderIds }.flatMap { it.directories }
                         if (selected.size > 64) throw SendSelectionException("Selecciona como máximo 64 archivos por envío.")
                         // Freeze every name/size before any network request, including legacy fallback.
                         val prepared = selected.map { uri ->
@@ -500,7 +523,7 @@ class MainActivity : ComponentActivity() {
                             val local = queued(uri)
                             if (local != null) {
                                 if (outgoingStore.file(local).length() != local.size) throw SendSelectionException("El archivo de la cola ya no está disponible. Elimínalo y vuelve a seleccionarlo.")
-                                return@map uri to UploadFile(local.name, local.size)
+                                return@map uri to UploadFile(local.name, local.size, local.relativePath)
                             }
                             val cursor = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
                                 ?: throw SendSelectionException("El proveedor no permite leer este archivo. Vuelve a seleccionarlo desde Archivos.")
@@ -516,11 +539,12 @@ class MainActivity : ComponentActivity() {
                             catch (_: IllegalArgumentException) { throw SendSelectionException("El tamaño de este archivo no es válido o supera ${formatBytes(Validation.MAX_SIZE)}.") }
                             uri to UploadFile(name, size)
                         }
-                        if (prepared.size > 1) try { uploadManifest(prepared.map { it.second }) }
+                        if (prepared.size > 1 || directories.isNotEmpty()) try { uploadManifest(prepared.map { it.second }, directories) }
                         catch (_: IllegalArgumentException) { throw SendSelectionException("Los nombres del lote superan el límite permitido. Selecciona menos archivos.") }
                         val c = connected()
-                        val authorization = UploadAuthorization(c, prepared.map { it.second })
+                        val authorization = UploadAuthorization(c, prepared.map { it.second }, directories)
                         var confirmationPending = false
+                        var authorized = false
                         val batchBytes = prepared.sumOf { it.second.size }
                         var queueState = SendQueueProgress(0, prepared.size, 0, true, totalBytes = batchBytes)
                         try {
@@ -528,7 +552,14 @@ class MainActivity : ComponentActivity() {
                             authorization.request({ cancelled }) {
                                 updateUi { message = "Espera la aceptación del lote en el PC." }
                             }
-                            updateUi { message = "" }
+                            authorized = true
+                            updateUi {
+                                message = if (prepared.isEmpty()) "Carpetas creadas y confirmadas en el PC." else ""
+                                if (prepared.isEmpty()) {
+                                    val entry = TransferPresentation(directories.first(), 0, "upload", result = "Carpetas creadas y confirmadas")
+                                    transfer = entry; session.record(entry)
+                                }
+                            }
                             SendQueue(prepared.withIndex().toList()).run({ cancelled }, { state ->
                                 queueState = state.copy(completedBytes = prepared.take(state.completed).sumOf { it.second.size }, totalBytes = batchBytes)
                                 val snapshot = queueState
@@ -651,9 +682,14 @@ class MainActivity : ComponentActivity() {
                             val stopped = queueState.copy(running = false)
                             updateUi {
                                 sendQueue = stopped
-                                if (uploadRetry?.remaining?.isEmpty() == true) uploadRetry = null
+                                if (authorized && queueState.completed == queueState.total) folderIds.forEach { id -> changeOutgoing { outgoingStore.removeFolder(id) } }
+                                uploadRetry = uploadRetry?.let { retry -> retry.copy(folders = retry.folders.filter { id -> outgoingStore.state.folders.any { it.id == id } }) }
+                                    ?.takeIf { it.remaining.isNotEmpty() || it.folders.isNotEmpty() }
                             }
-                            if (queueState.completed < queueState.total && sameGeneration()) authorization.stop(confirmationPending)
+                            if ((!authorized || queueState.completed < queueState.total || cancelled) && sameGeneration()) {
+                                authorization.stop(confirmationPending)
+                                updateUi { session.manualDispatch.value = emptyList(); changeOutgoing { outgoingStore.arm(false) } }
+                            }
                         }
                     }
                 }
@@ -678,6 +714,19 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+            fun enqueueFolder(uri: Uri, arm: Boolean) {
+                if (busy || pending != null) return
+                transfer = null; sendQueue = null
+                val intendedPeer = pair?.retryPeer()
+                post("queue_import", transferOperation = true, sourceUris = listOf(uri)) {
+                    val selection = readSendFolder(contentResolver, uri) { cancelled }
+                    outgoingStore.importFiles(selection.sources, arm, intendedPeer, selection.directories) { cancelled }
+                    updateUi { refreshOutgoing(); message = "Carpeta guardada en la cola, incluidas sus carpetas vacías." }
+                }
+            }
+            val sendFolderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+                if (uri != null) { selectedFolder = uri; dialog = "queue_folder_selection" }
+            }
             val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
                 if (uris.isNotEmpty()) { selectedFiles = uris; dialog = "queue_selection" }
             }
@@ -690,19 +739,26 @@ class MainActivity : ComponentActivity() {
                     enqueue(selection.uris, true, selection.peer)
                 }
             }
-            LaunchedEffect(pair, busy, outgoing, visible, offer, batchOffer, pending, shared, settingsOpen, dialog) {
-                if (visible && !settingsOpen && dialog == null && pair != null && !busy && outgoing.armed && outgoing.files.isNotEmpty() &&
+            LaunchedEffect(pair, busy, outgoing, visible, offer, batchOffer, pending, shared, settingsOpen, dialog, manualDispatch) {
+                if (visible && !settingsOpen && dialog == null && pair != null && !busy &&
                     pending == null && offer == null && batchOffer == null && shared.isEmpty()) {
-                    val eligible = pair?.let { outgoing.automaticFiles(it.retryPeer()) }.orEmpty()
-                    if (eligible.isNotEmpty()) startUpload(eligible.map(::queueUri))
+                    val automatic = pair?.let { outgoingDispatches(outgoing.automaticFiles(it.retryPeer()), outgoing.automaticFolders(it.retryPeer())) }.orEmpty()
+                    val next = manualDispatch.firstOrNull() ?: automatic.firstOrNull()
+                    if (next != null) {
+                        if (manualDispatch.isNotEmpty()) session.manualDispatch.value = manualDispatch.drop(1)
+                        startUpload(outgoing.files.filter { it.id in next.fileIds }.map(::queueUri), folderIds = next.folderIds)
+                    }
                 }
             }
+            fun dispatchAll() {
+                session.manualDispatch.value = outgoingDispatches(outgoing.files, outgoing.folders)
+            }
             fun sendOutgoing() {
-                if (pair != null && outgoing.files.any { it.peer != null && it.peer != pair?.retryPeer() }) dialog = "queue_destination"
-                else if (outgoing.files.any { it.uncertain }) dialog = "queue_uncertain"
+                if (pair != null && (outgoing.files.any { it.peer != null && it.peer != pair?.retryPeer() } || outgoing.folders.any { it.peer != null && it.peer != pair?.retryPeer() })) dialog = "queue_destination"
+                else if ((outgoing.files.any { it.uncertain } || outgoing.folders.any { it.uncertain })) dialog = "queue_uncertain"
                 else if (pair == null) {
                     if (changeOutgoing { outgoingStore.arm(true) }) message = "Cola preparada. Escanea el QR del PC para enviarla."
-                } else startUpload(outgoing.files.map(::queueUri))
+                } else dispatchAll()
             }
             DisposableEffect(pair) {
                 session.disposePoll?.invoke()
@@ -744,7 +800,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
             BackHandler(enabled = pair != null && dialog == null) { disconnectSession(); this@MainActivity.finish() }
-            fun receiveFile(c: ProtocolClient, selected: Transfer, accept: Boolean): Boolean {
+            fun receiveFile(c: ProtocolClient, selected: Transfer, accept: Boolean, location: ReceiveLocation? = null): Boolean {
                 transferId = selected.id
                 progressClock.set(0L)
                 updateUi { transfer = TransferPresentation(selected.name, selected.size, "download", phase = "Preparando recepción", id = selected.id) }
@@ -772,7 +828,7 @@ class MainActivity : ComponentActivity() {
                     require(remote.id == selected.id && remote.direction == "download" && remote.name == selected.name && remote.size == selected.size && remote.state == "awaiting_verification" && remote.sha256 == hash) { "La integridad no coincide" }
                     operationStage = "publish"
                     phase("Guardando archivo verificado")
-                    val received = receiveStorage.publish(temp, selected.name, selected.size, hash) { cancelled }
+                    val received = receiveStorage.publish(temp, selected.name, selected.size, hash, location) { cancelled }
                     published = true
                     temp.delete()
                     val generation = session.operationGeneration.get()
@@ -830,7 +886,15 @@ class MainActivity : ComponentActivity() {
                     try {
                         receiveStorage.validateDestination()
                         check(!cancelled)
-                        c.acceptDownloadBatch(selected.id)
+                        if (selected.directories.isNotEmpty()) operationStage = "prepare_folders"
+                        val locations = receiveStorage.prepareFolders(selected.directories) { cancelled }
+                        check(!cancelled)
+                        c.acceptDownloadBatch(selected.id, selected.files.isEmpty())
+                        if (selected.files.isEmpty()) updateUi {
+                            message = "Carpetas creadas y confirmadas, incluidas las vacías."
+                            val entry = TransferPresentation(selected.directories.first(), 0, "download", result = "Carpetas creadas y confirmadas")
+                            transfer = entry; session.record(entry)
+                        }
                         for ((index, file) in selected.files.withIndex()) {
                             check(!cancelled)
                             current = index + 1
@@ -840,7 +904,8 @@ class MainActivity : ComponentActivity() {
                             val ready = c.startDownloadBatchFile(selected.id, index)
                             transferId = ready.id
                             requireReadyDownload(ready, file)
-                            if (!receiveFile(c, ready, false)) break
+                            val location = file.relativePath?.substringBeforeLast('/')?.let { checkNotNull(locations[it]) }
+                            if (!receiveFile(c, ready, false, location)) break
                             completed++
                         }
                         if (completed == selected.files.size) {
@@ -917,7 +982,7 @@ class MainActivity : ComponentActivity() {
                     },
                     cancellable = busy && operationStage != "choose_folder",
                     message = message, transfer = transfer, sendQueue = sendQueue, offer = visibleOffer, batchOffer = batchOffer, activity = activity,
-                    outgoing = outgoing, queuedForOtherPeer = pair != null && outgoing.files.any { it.armed && it.peer != null && it.peer != pair?.retryPeer() },
+                    outgoing = outgoing, queuedForOtherPeer = pair != null && (outgoing.files.any { it.armed && it.peer != null && it.peer != pair?.retryPeer() } || outgoing.folders.any { it.armed && it.peer != null && it.peer != pair?.retryPeer() }),
                     onSendOutgoing = ::sendOutgoing,
                     onHoldOutgoing = { changeOutgoing { outgoingStore.arm(false) } },
                     onRemoveOutgoing = { removeOutgoing(it) },
@@ -935,6 +1000,8 @@ class MainActivity : ComponentActivity() {
                         else if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) launchScanner()
                         else cameraPermission.launch(Manifest.permission.CAMERA)
                     },
+                    onChooseOutgoingFolder = { sendFolderPicker.launch(null) },
+                    onRemoveOutgoingFolder = { removeOutgoingFolder(it) },
                     onFolder = { dialog = "folder" }, onSend = { picker.launch(arrayOf("*/*")) },
                     onReceive = ::queryInbox,
                     onRetrySend = {
@@ -942,7 +1009,8 @@ class MainActivity : ComponentActivity() {
                         if (retry != null) {
                             if (pair == null) scanForRetry(retry.peer)
                             else if (pair?.retryPeer() == retry.peer) {
-                                if (retry.uncertain == null) startUpload(retry.remaining, requiredPeer = retry.peer)
+                                if (retry.folders.isNotEmpty()) dialog = "uncertain_folder_retry"
+                                else if (retry.uncertain == null) startUpload(retry.remaining, requiredPeer = retry.peer, folderIds = retry.folders)
                                 else dialog = "uncertain_upload"
                             }
                         }
@@ -1003,7 +1071,10 @@ class MainActivity : ComponentActivity() {
                                     uploadRetry = uploadRetry?.confirmed(uri)
                                 }
                                 session.pendingUploadSource = null
-                                if (uploadRetry?.remaining?.isEmpty() == true) uploadRetry = null
+                                if (uploadRetry?.remaining?.isEmpty() == true) {
+                                    uploadRetry?.folders?.forEach { id -> changeOutgoing { outgoingStore.removeFolder(id) } }
+                                    uploadRetry = null
+                                }
                                 if (transfer?.direction == "download" && sendQueue == null) inboxRetry = null
                                 pending = null
                                 message = "Confirmación remota completada."
@@ -1014,17 +1085,28 @@ class MainActivity : ComponentActivity() {
                     onOpenReceived = { openFile(it.uri, it.location.tree) }, onOpenLocation = ::openLocation,
                 )
                 when (dialog) {
+                    "uncertain_folder_retry" -> uploadRetry?.let { retry -> AlertDialog(
+                        onDismissRequest = { dialog = null }, title = { Text("Reenviar carpeta pendiente") },
+                        text = { Text("Se creará otra raíz con los archivos pendientes. Se conservan los ya verificados y pueden existir carpetas vacías del intento anterior. Comprueba el destino; el archivo sin confirmar pudo guardarse también.") },
+                        confirmButton = { TextButton(onClick = { dialog = null; startUpload(retry.remaining, retry.uncertain, retry.peer, retry.folders) }) { Text("Reenviar pendientes") } },
+                        dismissButton = { TextButton(onClick = { dialog = null }) { Text("Volver") } },
+                    ) }
                     "queue_destination" -> AlertDialog(
                         onDismissRequest = { dialog = null },
                         title = { Text("¿Enviar la cola a este PC?") },
                         text = { Text("Hay archivos preparados para otro PC. El PC conectado ahora es ${pair?.serverName ?: "el seleccionado"}.") },
                         confirmButton = { TextButton(onClick = {
                             dialog = null
-                            if (outgoing.files.any { it.uncertain }) dialog = "queue_uncertain"
-                            else startUpload(outgoing.files.map(::queueUri))
+                            if ((outgoing.files.any { it.uncertain } || outgoing.folders.any { it.uncertain })) dialog = "queue_uncertain"
+                            else dispatchAll()
                         }) { Text("Enviar a este PC") } },
                         dismissButton = { TextButton(onClick = { dialog = null }) { Text("Volver") } },
                     )
+                    "queue_folder_selection" -> EssentialDialog("Carpeta seleccionada", { selectedFolder = null; dialog = null }) {
+                        Text("Se copiará la carpeta completa a la cola privada, incluidas las vacías. Hasta 64 archivos y 64 carpetas; requiere espacio libre adicional.")
+                        Button(onClick = { selectedFolder?.let { enqueueFolder(it, true) }; selectedFolder = null; dialog = null }) { Text(if (pair == null) "Enviar al conectar" else "Enviar ahora") }
+                        TextButton(onClick = { selectedFolder?.let { enqueueFolder(it, false) }; selectedFolder = null; dialog = null }) { Text("Dejar en espera") }
+                    }
                     "queue_selection" -> EssentialDialog("Archivos seleccionados", { selectedFiles = emptyList(); dialog = null }) {
                         Text("${selectedFiles.size} archivos. Se copiarán a la cola privada de File Transfer; necesitan espacio libre en el teléfono.")
                         Button(onClick = { val uris = selectedFiles; selectedFiles = emptyList(); dialog = null; enqueue(uris, true) }) {
@@ -1035,14 +1117,15 @@ class MainActivity : ComponentActivity() {
                     "queue_uncertain" -> AlertDialog(
                         onDismissRequest = { dialog = null },
                         title = { Text("Comprueba los archivos sin confirmar") },
-                        text = { Text("El PC pudo guardar los archivos marcados sin confirmar. Comprueba el destino antes de reenviarlos para evitar copias duplicadas.") },
+                        text = { Text("El PC pudo guardar los archivos o crear las carpetas marcadas sin confirmar. Al reintentar una carpeta se creará otra raíz con los pendientes; los verificados se conservan. Comprueba el destino antes de reenviar.") },
                         confirmButton = { TextButton(onClick = {
                             dialog = null
                             if (pair == null) { message = "Conecta con el PC y pulsa Enviar cola para confirmar el reenvío." }
-                            else startUpload(outgoing.files.map(::queueUri))
+                            else dispatchAll()
                         }) { Text("Reenviar todos") } },
                         dismissButton = { TextButton(onClick = {
-                            if (outgoing.files.filter { it.uncertain }.all(::removeOutgoing)) {
+                            if (outgoing.folders.filter { it.uncertain }.all(::removeOutgoingFolder) &&
+                                outgoing.files.filter { it.uncertain && outgoingStore.state.files.any { entry -> entry.id == it.id } }.all(::removeOutgoing)) {
                                 dialog = null
                                 message = "Se retiraron los archivos sin confirmar de la cola."
                             }
@@ -1050,8 +1133,9 @@ class MainActivity : ComponentActivity() {
                     )
                     "batch_detail" -> EssentialDialog("Detalle del lote", { dialog = null }) {
                         batchOffer?.let { batch ->
-                            Text("${batch.files.size} archivos · ${formatBytes(batch.files.sumOf { it.size })}")
-                            batch.files.forEach { FileRow(it.name, formatBytes(it.size)) }
+                            Text("${batch.files.size} archivos · ${batch.directories.size} carpetas · ${formatBytes(batch.files.sumOf { it.size })}")
+                            batch.directories.forEach { FileRow(it, "Carpeta", "folder") }
+                            batch.files.forEach { FileRow(it.relativePath ?: it.name, formatBytes(it.size)) }
                             Text("Destino: $destination")
                             Button(onClick = { receiveBatch(batch) }, enabled = !busy && pending == null) { Text("Aceptar lote") }
                         }
@@ -1104,7 +1188,7 @@ class MainActivity : ComponentActivity() {
                         fun continueUpload(includeUncertain: Boolean) {
                             dialog = null
                             val selected = retry.nextSelection(includeUncertain)
-                            if (selected.isEmpty()) uploadRetry = null else startUpload(selected, retry.uncertain.takeIf { includeUncertain }, retry.peer)
+                            if (selected.isEmpty() && retry.folders.isEmpty()) uploadRetry = null else startUpload(selected, retry.uncertain.takeIf { includeUncertain }, retry.peer, retry.folders)
                         }
                         AlertDialog(
                             containerColor = MaterialTheme.colorScheme.surface,

@@ -53,6 +53,7 @@ internal object ActiveTransfer {
         Intent(context, TransferForegroundService::class.java).putExtra("operation_id", id).apply {
             if (sources.isNotEmpty()) {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                if (sources.any(android.provider.DocumentsContract::isTreeUri)) addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
                 clipData = ClipData.newRawUri("Archivos en cola", sources.first()).apply {
                     sources.drop(1).forEach { addItem(ClipData.Item(it)) }
                 }

@@ -10,6 +10,7 @@ internal data class UploadRetry<T>(
     val peer: RetryPeer,
     val remaining: List<T>,
     val uncertain: T? = null,
+    val folders: List<String> = emptyList(),
 ) {
     fun confirming(source: T) = copy(uncertain = source)
     fun confirmed(source: T) = copy(remaining = remaining - source, uncertain = uncertain?.takeUnless { it == source })
