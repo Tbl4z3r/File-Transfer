@@ -1,3 +1,4 @@
+import { encodeConnectionCode, type Descriptor } from "./pairing-code.js";
 import { encodePairingQr } from "./pairing-qr.js";
 type Peer = { id: string; name: string; supports_inbox: boolean };
 type Transfer = {
@@ -44,11 +45,6 @@ type Snapshot = {
   transfers: Transfer[];
   upload_batch: TransferBatch | null;
   download_batch: TransferBatch | null;
-};
-type Descriptor = {
-  cert_sha256: string;
-  pairing_token: string;
-  [key: string]: unknown;
 };
 declare global {
   interface Window {
@@ -379,6 +375,9 @@ function hideDescriptor(): void {
   $("pair-qr").classList.add("hidden");
   $("qr-error").classList.add("hidden");
   $<HTMLTextAreaElement>("descriptor").value = "";
+  const code = $<HTMLTextAreaElement>("connection-code");
+  code.value = "";
+  code.hidden = true;
   $("fingerprint").textContent = "";
   $<HTMLDetailsElement>("manual-pair").open = false;
   const panel = $<HTMLDialogElement>("pair-panel");
@@ -1246,8 +1245,10 @@ async function showPairing() {
   const descriptor = await invoke<Descriptor>("open_pairing_window");
   if (generation !== pairingGeneration || performance.now() >= until) return;
   const payload = JSON.stringify(descriptor);
+  const code = encodeConnectionCode(descriptor);
   descriptorUntil = until;
   $<HTMLTextAreaElement>("descriptor").value = payload;
+  $<HTMLTextAreaElement>("connection-code").value = code;
   $("fingerprint").textContent =
     `Huella: ${descriptor.cert_sha256.match(/.{1,8}/g)?.join(" ")}`;
   try {
@@ -1271,23 +1272,33 @@ $<HTMLDialogElement>("pair-panel").addEventListener("cancel", (event) => {
   event.preventDefault();
   hideDescriptor();
 });
-$("copy-pair").onclick = () => {
+function copyPairingValue(id: string): void {
   void action(async () => {
     if (!descriptorUntil || performance.now() >= descriptorUntil) {
       hideDescriptor();
       return;
     }
+    const generation = pairingGeneration;
+    const field = $<HTMLTextAreaElement>(id);
     try {
-      await navigator.clipboard.writeText(
-        $<HTMLTextAreaElement>("descriptor").value,
-      );
-      notice("Datos copiados. Pégalos solo en tu Android.");
+      await navigator.clipboard.writeText(field.value);
+      if (generation === pairingGeneration)
+        notice("Datos copiados. Pégalos solo en tu Android.");
     } catch {
-      $<HTMLTextAreaElement>("descriptor").select();
-      notice("Selecciona Copiar o pulsa Ctrl+C para copiar los datos.");
+      if (generation !== pairingGeneration) return;
+      if (performance.now() >= descriptorUntil) {
+        hideDescriptor();
+        return;
+      }
+      field.hidden = false;
+      field.focus();
+      field.select();
+      notice("Pulsa Ctrl+C para copiar los datos seleccionados.");
     }
   });
-};
+}
+$("copy-code").onclick = () => copyPairingValue("connection-code");
+$("copy-pair").onclick = () => copyPairingValue("descriptor");
 $("open-activity").onclick = $("all-activity").onclick = () =>
   showPanel("activity-panel");
 $("open-devices").onclick = () => showPanel("devices-panel");

@@ -65,6 +65,10 @@
     "failed_upload":{"transfer_id":"33333333-3333-4333-8333-333333333333","direction":"upload","file_name":"prueba.txt","size_bytes":"3","state":"failed","bytes_transferred":"2","error_code":"size_mismatch"},
     "error":{"error":{"code":"integrity_mismatch","message":"Los hashes no coinciden."}}
   },
+  "compact_connection": {
+    "descriptor":{"v":1,"host":"192.168.1.20","port":51337,"server_device_id":"abcdefab-1234-4567-abcd-123456789abc","cert_sha256":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","pairing_token":"4OHi4-Tl5ufo6err7O3u7_Dx8vP09fb3-Pn6-_z9_v8"},
+    "code":"FT1-wKgBFMiJq83vqxI0RWerzRI0VniavAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f4OHi4-Tl5ufo6err7O3u7_Dx8vP09fb3-Pn6-_z9_v8"
+  },
   "scenarios": [
     {"case":"upload_requires_local_acceptance","expected":"PUT content before ready: 409 invalid_state; no destination published"},
     {"case":"download_requires_android_acceptance","expected":"GET content before accept: 409 invalid_state"},

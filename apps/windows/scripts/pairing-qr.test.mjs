@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ui, fixture, payload } from "./ui-harness.mjs";
+import { encodeConnectionCode } from "../dist/pairing-code.js";
 import {
   encodePairingQr,
   MODULE_PIXELS,
@@ -32,6 +33,8 @@ for (const exit of ["hide", "expiry", "stop"])
       await h.settle();
     }
     assert.equal(h.element("descriptor").value, "");
+    assert.equal(h.element("connection-code").value, "");
+    assert.equal(h.element("connection-code").hidden, true);
     assert.equal(h.element("pair-qr").src, "");
     assert.equal(h.element("pair-panel").open, false);
   });
@@ -94,6 +97,45 @@ for (const exit of ["escape", "native-close", "pagehide", "session-closed"])
       await h.tick();
     }
     assert.equal(h.element("descriptor").value, "");
+    assert.equal(h.element("connection-code").value, "");
+    assert.equal(h.element("connection-code").hidden, true);
     assert.equal(h.element("pair-qr").src, "");
     assert.equal(h.element("pair-panel").open, false);
   });
+
+
+test("compact code matches the cross-platform 86-byte vector", () => {
+  const { code, descriptor } = fixture.compact_connection;
+  assert.equal(encodeConnectionCode(descriptor), code);
+  assert.equal(Buffer.from(code.slice(4), "base64url").length, 86);
+});
+
+test("the pairing window copies the compact code and keeps the same legacy JSON in the QR", async () => {
+  let qrInput;
+  const h = await ui((text) => {
+    qrInput = text;
+    return encodePairingQr(text);
+  });
+  await h.open();
+  assert.equal(qrInput, payload);
+  h.element("copy-code").click();
+  await h.settle();
+  h.element("copy-pair").click();
+  await h.settle();
+  assert.deepEqual(h.clipboard, [encodeConnectionCode(fixture.messages.descriptor), payload]);
+});
+
+test("the compact code is selectable when the clipboard is blocked", async () => {
+  const h = await ui();
+  h.blockClipboard();
+  await h.open();
+  h.element("copy-code").click();
+  await h.settle();
+  const code = h.element("connection-code");
+  assert.equal(code.hidden, false);
+  assert.equal(code.selected, true);
+  assert.equal(h.document.activeElement, code);
+  await h.expire();
+  assert.equal(code.value, "");
+  assert.equal(code.hidden, true);
+});

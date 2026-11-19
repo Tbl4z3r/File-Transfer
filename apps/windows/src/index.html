@@ -277,19 +277,19 @@
     </dialog>
     <dialog id="pair-panel" aria-labelledby="pair-title">
       <div class="dialog-heading">
-        <h2 id="pair-title">Escanear para conectar</h2>
+        <h2 id="pair-title">Conectar Android</h2>
         <button
           id="hide-pair"
           class="icon-button"
           type="button"
-          aria-label="Cerrar código QR"
+          aria-label="Cerrar conexión"
         >
           <svg class="icon" aria-hidden="true"><use href="#icon-close" /></svg>
         </button>
       </div>
       <p class="dialog-notice hidden" role="status" aria-live="polite"></p>
       <p>
-        En Android pulsa «Escanear QR del PC» y apunta a este código. Comparte
+        En Android pulsa «Escanear QR» y apunta a este código. Comparte
         estos datos solo con tu móvil, mirando ambas pantallas. Válido durante
         <strong id="pair-seconds">120</strong> segundos.
       </p>
@@ -304,17 +304,16 @@
           intentarlo.
         </p>
       </div>
+      <button id="copy-code" type="button">Copiar código</button>
+      <textarea id="connection-code" readonly hidden rows="2"
+        aria-label="Código de conexión" spellcheck="false"></textarea>
+      <p class="manual-pair-hint">En Android, pégalo en Ajustes → Conexión manual.</p>
       <details id="manual-pair">
-        <summary>Conexión manual</summary>
-        <code id="fingerprint"></code
-        ><textarea
-          id="descriptor"
-          readonly
-          rows="5"
-          aria-label="Descriptor de emparejamiento"
-          spellcheck="false"
-        ></textarea
-        ><button id="copy-pair" type="button">Copiar datos de conexión</button>
+        <summary>JSON para versiones anteriores</summary>
+        <code id="fingerprint"></code>
+        <textarea id="descriptor" readonly rows="5"
+          aria-label="Descriptor JSON de emparejamiento" spellcheck="false"></textarea>
+        <button id="copy-pair" type="button">Copiar JSON</button>
       </details>
     </dialog>
     <script type="module" src="./main.js"></script>

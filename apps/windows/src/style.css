@@ -580,6 +580,13 @@ summary {
   font-weight: 600;
   color: var(--accent);
 }
+.manual-pair-hint {
+  color: var(--muted);
+  margin: 8px 0 0;
+}
+#connection-code {
+  margin-top: 10px;
+}
 #fingerprint {
   display: block;
   overflow-wrap: anywhere;
