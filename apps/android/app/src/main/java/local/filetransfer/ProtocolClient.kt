@@ -7,6 +7,7 @@ import java.net.Proxy
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.cert.X509Certificate
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManagerFactory
@@ -58,6 +59,8 @@ object Validation {
     fun token(s: String) = token.matches(s)
     const val MAX_SIZE = 1099511627776L
     fun size(s: String): Long { require(Regex("0|[1-9][0-9]*").matches(s)); return s.toLong().also { require(it <= MAX_SIZE) } }
+    fun deviceName(s: String) = s.codePointCount(0, s.length) in 1..64 &&
+        s.none { it.code < 32 || it.code == 127 } && Charsets.UTF_8.newEncoder().canEncode(s)
     fun name(s: String): Boolean {
         if (s.isEmpty() || s.toByteArray(Charsets.UTF_8).size > 180 || s == "." || s == ".." || s.last() == '.' || s.last() == ' ') return false
         if (s.any { it.code < 32 || it.code == 127 || it in "/\\:*?\"<>|" }) return false
@@ -69,13 +72,36 @@ fun ByteArray.hex() = joinToString("") { "%02x".format(it.toInt() and 255) }
 
 data class Descriptor(val host: String, val port: Int, val serverId: String, val pin: String, val token: String) {
     companion object {
+        private const val CODE_PREFIX = "FT1-"
+        private val codePayload = Regex("[A-Za-z0-9_-]{115}")
+        private val base64url = Base64.getUrlEncoder().withoutPadding()
+
         fun parse(raw: String): Descriptor {
-            require(raw.toByteArray().size <= 16384)
-            val o = strictObject(raw.toByteArray(Charsets.UTF_8)); require(o.keys().asSequence().toSet() == setOf("v", "host", "port", "server_device_id", "cert_sha256", "pairing_token"))
-            require(o.get("v") is Int && o.integer("v") == 1 && o.get("port") is Int)
-            val d = Descriptor(o.text("host"), o.integer("port"), o.text("server_device_id"), o.text("cert_sha256").filterNot(Char::isWhitespace).lowercase(), o.text("pairing_token"))
-            require(Validation.ipv4(d.host) && d.port in 1024..65535 && Validation.id(d.serverId) && Validation.hash(d.pin) && Validation.token(d.token))
-            return d
+            val descriptor = if (raw.startsWith(CODE_PREFIX)) parseCode(raw.substring(CODE_PREFIX.length)) else parseJson(raw)
+            require(Validation.ipv4(descriptor.host) && descriptor.port in 1024..65535 &&
+                Validation.id(descriptor.serverId) && Validation.hash(descriptor.pin) && Validation.token(descriptor.token))
+            return descriptor
+        }
+
+        private fun parseCode(payload: String): Descriptor {
+            require(codePayload.matches(payload))
+            val bytes = Base64.getUrlDecoder().decode(payload)
+            require(bytes.size == 86 && base64url.encodeToString(bytes) == payload)
+            val host = bytes.sliceArray(0 until 4).joinToString(".") { (it.toInt() and 255).toString() }
+            val port = ((bytes[4].toInt() and 255) shl 8) or (bytes[5].toInt() and 255)
+            val idBytes = bytes.sliceArray(6 until 22).hex()
+            val serverId = listOf(0..7, 8..11, 12..15, 16..19, 20..31).joinToString("-") { idBytes.substring(it) }
+            val pin = bytes.sliceArray(22 until 54).hex()
+            val token = base64url.encodeToString(bytes.sliceArray(54 until 86))
+            return Descriptor(host, port, serverId, pin, token)
+        }
+
+        private fun parseJson(raw: String): Descriptor {
+            val o = strictObject(raw.toByteArray(Charsets.UTF_8))
+            require(o.keys().asSequence().toSet() == setOf("v", "host", "port", "server_device_id", "cert_sha256", "pairing_token"))
+            require(o.integer("v") == 1)
+            return Descriptor(o.text("host"), o.integer("port"), o.text("server_device_id"),
+                o.text("cert_sha256").filterNot(Char::isWhitespace).lowercase(), o.text("pairing_token"))
         }
     }
 }
@@ -197,10 +223,10 @@ class ProtocolClient(private val host: String, private val port: Int, pin: Strin
         }
     }
     fun pair(d: Descriptor, name: String): Pairing {
-        require(name.isNotEmpty() && name.codePointCount(0, name.length) <= 64 && name.none { it.code < 32 || it.code == 127 })
+        require(Validation.deviceName(name))
         val o = json("pair", "POST", JSONObject().put("pairing_token", d.token).put("device_id", deviceId).put("device_name", name), false)
         require(o.keys().asSequence().toSet() == setOf("protocol_version", "server_device_id", "server_name", "credential") && o.integer("protocol_version") == 1 && o.text("server_device_id") == d.serverId)
-        val serverName = o.text("server_name"); require(serverName.isNotEmpty() && serverName.codePointCount(0, serverName.length) <= 64 && serverName.none { it.code < 32 || it.code == 127 })
+        val serverName = o.text("server_name"); require(Validation.deviceName(serverName))
         val secret = o.text("credential"); require(Validation.token(secret)); credential = secret
         return Pairing(host, port, d.serverId, d.pin, deviceId, secret, serverName)
     }

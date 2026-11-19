@@ -1,6 +1,7 @@
 // DOM/IPC adapter for command and QR regression tests, excluded from the build.
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import { encodeConnectionCode } from "../dist/pairing-code.js";
 import { encodePairingQr } from "../dist/pairing-qr.js";
 export const fixture = JSON.parse(
   await readFile(
@@ -15,7 +16,7 @@ const html = await readFile(
 );
 const script = (
   await readFile(new URL("../dist/main.js", import.meta.url), "utf8")
-).replace(/^import .*?;\n/, "");
+).replace(/^import .*?;\n/gm, "");
 const camel = (name) =>
   name.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
 export async function ui(encoder = encodePairingQr, initial = {}) {
@@ -23,6 +24,8 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
   const roots = [];
   const calls = [];
   const windowListeners = new Map();
+  const clipboard = [];
+  let clipboardBlocked = false;
   let document;
   class Element {
     constructor(tag = "div") {
@@ -178,6 +181,7 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
     element.className = attrs.match(/\bclass="([^"]+)"/)?.[1] ?? "";
     element.value = attrs.match(/\bvalue="([^"]+)"/)?.[1] ?? "";
     element.disabled = /\bdisabled\b/.test(attrs);
+    element.hidden = /(?:^|\s)hidden(?:\s|$)/.test(attrs);
     const close = attrs.match(/data-close="([^"]+)"/)?.[1];
     if (close) element.dataset.close = close;
     if (id) elements.set(id, element);
@@ -237,12 +241,20 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
       },
     },
     encodePairingQr: encoder,
+    encodeConnectionCode,
     performance: { now: () => now },
     setInterval: (callback) => {
       interval = callback;
     },
     console,
-    navigator: { clipboard: { writeText: async () => {} } },
+    navigator: {
+      clipboard: {
+        async writeText(value) {
+          if (clipboardBlocked) throw new Error("Clipboard denied");
+          clipboard.push(value);
+        },
+      },
+    },
   };
   vm.runInNewContext(script, context);
   const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -252,6 +264,8 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
     document,
     snapshot,
     calls,
+    clipboard,
+    blockClipboard: () => { clipboardBlocked = true; },
     settle,
     onSnapshot: (callback) => { snapshotHandler = callback; },
     onInvoke: (callback) => {

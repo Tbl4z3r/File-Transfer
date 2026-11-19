@@ -88,6 +88,14 @@ class MainActivity : ComponentActivity() {
         get() = session.pendingUploadBatchId
         set(value) { session.pendingUploadBatchId = value }
 
+    private val preferences by lazy { getSharedPreferences("local_preferences", MODE_PRIVATE) }
+    private var diagnostic: String?
+        get() = session.diagnostic.value
+        set(value) {
+            session.diagnostic.value = value
+            if (value != null) preferences.edit().putString("last_error", value).apply()
+        }
+
     private fun sameGeneration() = session.operationGeneration.get()?.let { it == session.generation } ?: true
 
     private fun updateUi(action: () -> Unit) {
@@ -146,17 +154,21 @@ class MainActivity : ComponentActivity() {
         }
         File(filesDir, "partial").apply { mkdirs(); if (lastCustomNonConfigurationInstance == null) listFiles()?.forEach { it.delete() } }
         PairStore(this) // Discard credentials left by older versions; never restore pairing.
+        val savedDeviceName = preferences.getString("device_name", null)?.takeIf(Validation::deviceName) ?: "Android personal"
+        if (session.diagnostic.value == null) session.diagnostic.value = preferences.getString("last_error", null)
         setContent {
             var pair by remember { session.pair }
             var descriptor by remember { mutableStateOf("") }
-            var deviceName by rememberSaveable { mutableStateOf("Android personal") }
+            var deviceName by remember { mutableStateOf(savedDeviceName) }
+            var nameDraft by remember { mutableStateOf("") }
+            var settingsOpen by rememberSaveable { mutableStateOf(false) }
+            var manualOpen by rememberSaveable { mutableStateOf(false) }
             var message by remember { session.message }
             var busy by remember { session.busy }
             var address by remember { mutableStateOf(pair?.host ?: "") }
             var portText by remember { mutableStateOf(pair?.port?.toString() ?: "") }
             var pending by remember { session.pending }
             var destination by remember { session.destination }
-            var diagnostic by remember { session.diagnostic }
             var offer by remember { session.offer }
             var transfer by remember { session.transfer }
             var uploadRetry by remember { session.uploadRetry }
@@ -232,7 +244,6 @@ class MainActivity : ComponentActivity() {
                 val operationGeneration = session.generation
                 cancelled = false
                 busy = true
-                diagnostic = null
                 message = ""
                 operationStage = stage
                 worker.execute {
@@ -293,8 +304,12 @@ class MainActivity : ComponentActivity() {
                 post("offers") { refreshInbox(connected()) }
             }
             fun startPair(raw: String) {
+                if (busy || pair != null) return
                 val name = deviceName
                 val reconnect = reconnectFor
+                descriptor = ""
+                manualOpen = false
+                settingsOpen = false
                 dialog = null
                 post("pair") {
                     val p = try {
@@ -302,25 +317,28 @@ class MainActivity : ComponentActivity() {
                             if (reconnect != null && d.retryPeer() != reconnect.peer) throw RetryPeerMismatch()
                             ProtocolClient(d.host, d.port, d.pin, java.util.UUID.randomUUID().toString()).also { client = it }.pair(d, name)
                         }
-                    } catch (_: RetryPeerMismatch) {
-                        updateUi { message = "Escanea el QR del mismo PC para reintentar." }
+                    } catch (error: RetryPeerMismatch) {
+                        val details = TransferDiagnostics.describe("pair", error)
+                        updateUi { diagnostic = details; message = "Usa un QR o código del mismo PC para reintentar." }
                         return@post
-                    } catch (_: InvalidDescriptor) {
-                        updateUi { message = "El código o descriptor no es válido. Genera otro QR en el PC o usa el JSON manual." }
+                    } catch (error: InvalidDescriptor) {
+                        val details = TransferDiagnostics.describe("pair", error)
+                        updateUi { diagnostic = details; message = "Los datos de conexión no son válidos. Abre un nuevo QR en el PC e inténtalo de nuevo." }
                         return@post
                     } catch (error: ProtocolException) {
                         val explanation = when (error.code) {
-                            "pairing_denied" -> "El QR ha caducado o ya se usó. Genera otro en el PC e inténtalo de nuevo."
-                            "already_paired" -> "Este teléfono ya está emparejado. Revoca el emparejamiento anterior en el PC y genera otro QR."
+                            "pairing_denied" -> "El QR o código ha caducado o ya se usó. Abre otro en el PC e inténtalo de nuevo."
+                            "already_paired" -> "Este teléfono ya está emparejado. Revoca el vínculo anterior en el PC y abre otro QR."
                             else -> throw error
                         }
-                        updateUi { message = explanation }
+                        val details = TransferDiagnostics.describe("pair", error)
+                        updateUi { diagnostic = details; message = explanation }
                         return@post
                     }
                     val pairingGeneration = session.operationGeneration.get() ?: session.generation
                     runOnUiThread {
                         if (pairingGeneration != session.generation || cancelled || isFinishing) bestEffortDisconnect(p)
-                        else { reconnectFor = null; pair = p; address = p.host; portText = p.port.toString(); descriptor = ""; message = "Dispositivo emparejado." }
+                        else { reconnectFor = null; pair = p; address = p.host; portText = p.port.toString(); message = "Dispositivo emparejado." }
                     }
                     if (reconnect?.refreshInbox == true && !cancelled) {
                         operationStage = "offers"
@@ -672,10 +690,44 @@ class MainActivity : ComponentActivity() {
                     cameraPermission.launch(Manifest.permission.CAMERA)
                 }
             }
+            fun closeManual() {
+                descriptor = ""
+                manualOpen = false
+            }
+            BackHandler(enabled = settingsOpen && dialog == null) {
+                if (manualOpen) closeManual() else settingsOpen = false
+            }
             EsencialTheme {
                 val visibleOffer = offer
-                EsencialScreen(
-                    pairedName = pair?.serverName?.takeIf { it.isNotBlank() }, pairedHost = pair?.let { "${it.host}:${it.port}" }, destination = destination, busy = busy,
+                if (settingsOpen && manualOpen && pair == null) {
+                    ManualConnectionScreen(descriptor, busy, ::closeManual, { descriptor = it }) { startPair(descriptor.trim()) }
+                } else if (settingsOpen) {
+                    SettingsScreen(
+                        destination = destination, paired = pair != null, busy = busy, address = address, port = portText,
+                        lastError = diagnostic, onBack = { settingsOpen = false },
+                        onFolder = { dialog = "folder" }, onManual = { manualOpen = true },
+                        onAddress = { address = it }, onPort = { portText = it },
+                        onSaveAddress = {
+                            val port = portText.toIntOrNull()
+                            val current = pair
+                            if (current != null && Validation.ipv4(address) && port != null && port in 1024..65535) {
+                                pair = current.copy(host = address, port = port)
+                                message = "Dirección actualizada."
+                            } else message = "IP o puerto no válido."
+                            settingsOpen = false
+                        },
+                        onForget = { dialog = "forget" },
+                        onCopyError = {
+                            diagnostic?.let {
+                                (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager)
+                                    .setPrimaryClip(ClipData.newPlainText("Diagnóstico File Transfer", it))
+                                Toast.makeText(this@MainActivity, "Diagnóstico copiado", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                    )
+                } else EsencialScreen(
+                    pairedName = pair?.serverName?.takeIf { it.isNotBlank() }, pairedHost = pair?.let { "${it.host}:${it.port}" },
+                    deviceName = deviceName, destination = destination, busy = busy,
                     busyLabel = when (operationStage) {
                         "choose_folder" -> "Actualizando carpeta…"
                         "offers" -> "Consultando archivos del PC…"
@@ -686,10 +738,14 @@ class MainActivity : ComponentActivity() {
                     },
                     cancellable = busy && operationStage != "choose_folder",
                     message = message, transfer = transfer, sendQueue = sendQueue, offer = visibleOffer, batchOffer = batchOffer, activity = activity,
-                    hasPending = pending != null, hasDiagnostic = diagnostic != null,
+                    hasPending = pending != null,
                     canRetrySend = uploadRetry?.let { pair == null || pair?.retryPeer() == it.peer } == true,
                     canRetryInbox = inboxRetry?.let { pair == null || pair?.retryPeer() == it } == true,
-                    onSettings = { dialog = "settings" },
+                    onSettings = {
+                        pair?.let { address = it.host; portText = it.port.toString() }
+                        settingsOpen = true
+                    },
+                    onEditName = { nameDraft = deviceName; dialog = "device_name" },
                     onScan = {
                         reconnectFor = null
                         if (!packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) message = "No hay cámara disponible. Usa la conexión manual en Ajustes."
@@ -768,10 +824,6 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     },
-                    onDiagnostic = {
-                        diagnostic?.let { (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Diagnóstico File Transfer", it)) }
-                        message = "Diagnóstico copiado; no incluye credenciales ni rutas de archivos."
-                    },
                     onActivity = { dialog = "activity" },
                     onOpenReceived = { openFile(it.uri, it.location.tree) }, onOpenLocation = ::openLocation,
                 )
@@ -784,33 +836,21 @@ class MainActivity : ComponentActivity() {
                             Button(onClick = { receiveBatch(batch) }, enabled = !busy && pending == null) { Text("Aceptar lote") }
                         }
                     }
-                    "settings" -> EssentialDialog("Ajustes", { dialog = null }) {
-                        TextButton(onClick = { dialog = "folder" }, enabled = !busy) { Text("Carpeta de recepción") }
-                        if (pair == null) {
-                            OutlinedTextField(deviceName, { deviceName = it }, label = { Text("Nombre de este dispositivo") }, enabled = !busy, modifier = Modifier.fillMaxWidth())
-                            TextButton(onClick = { dialog = "manual" }, enabled = !busy) { Text("Conexión manual con JSON") }
-                        } else {
-                            Text("Conexión", style = MaterialTheme.typography.titleSmall)
-                            OutlinedTextField(address, { address = it }, label = { Text("IP del PC") }, enabled = !busy, modifier = Modifier.fillMaxWidth())
-                            OutlinedTextField(portText, { portText = it }, label = { Text("Puerto") }, enabled = !busy, modifier = Modifier.fillMaxWidth())
-                            TextButton(enabled = !busy, onClick = {
-                                runCatching {
-                                    val port = portText.toInt()
-                                    require(Validation.ipv4(address) && port in 1024..65535)
-                                    val updated = pair!!.copy(host = address, port = port)
-                                    pair = updated
-                                    message = "Dirección actualizada; se conserva la identidad emparejada."
-                                    dialog = null
-                                }.onFailure { message = "IP o puerto no válido."; dialog = null }
-                            }) { Text("Actualizar dirección") }
-                            TextButton(enabled = !busy, onClick = { dialog = "forget" }) { Text("Olvidar dispositivo") }
-                        }
-                        Text("Versión ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodySmall)
-                    }
-                    "manual" -> EssentialDialog("Conexión manual", { descriptor = ""; dialog = null }) {
-                        Text("Copia el descriptor JSON que muestra tu PC.")
-                        OutlinedTextField(descriptor, { descriptor = it }, label = { Text("Descriptor JSON") }, enabled = !busy, modifier = Modifier.fillMaxWidth())
-                        Button(enabled = !busy && descriptor.isNotBlank(), onClick = { startPair(descriptor) }) { Text("Emparejar con JSON") }
+                    "device_name" -> EssentialDialog("Nombre del teléfono", { dialog = null }) {
+                        val name = nameDraft.trim()
+                        val valid = Validation.deviceName(name)
+                        OutlinedTextField(nameDraft, { nameDraft = it }, label = { Text("Nombre del teléfono") },
+                            isError = !valid, singleLine = true, modifier = Modifier.fillMaxWidth())
+                        Text(
+                            if (valid) "El PC verá este nombre la próxima vez que conectes."
+                            else "Escribe un nombre de 1 a 64 caracteres, sin caracteres de control.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Button(enabled = valid && !busy, onClick = {
+                            deviceName = name
+                            preferences.edit().putString("device_name", name).apply()
+                            dialog = null
+                        }) { Text("Guardar nombre") }
                     }
                     "folder" -> EssentialDialog("Carpeta de recepción", { dialog = null }) {
                         Text(destination)
@@ -875,9 +915,9 @@ class MainActivity : ComponentActivity() {
                             message = "Confirmación cerrada en este teléfono."
                         }) { Text("Cerrar confirmación") }
                     }, dismissButton = { TextButton(onClick = { dialog = null }) { Text("Volver") } })
-                    "forget" -> AlertDialog(containerColor = MaterialTheme.colorScheme.surface, onDismissRequest = { dialog = null }, title = { Text("¿Olvidar este PC?") }, text = { Text("Se cerrará la sesión con el PC. Para volver a conectar tendrás que escanear otro QR.") }, confirmButton = {
-                        TextButton(onClick = { disconnectSession(); pair = null; pending = null; offer = null; batchOffer = null; transfer = null; sendQueue = null; dialog = null; message = "Dispositivo olvidado en este teléfono." }) { Text("Olvidar") }
-                    }, dismissButton = { TextButton(onClick = { dialog = "settings" }) { Text("Volver") } })
+                    "forget" -> AlertDialog(containerColor = MaterialTheme.colorScheme.surface, onDismissRequest = { dialog = null }, title = { Text("¿Olvidar este PC?") }, text = { Text("Se cerrará la sesión con el PC. Para volver a conectar, abre otro QR o código en el PC.") }, confirmButton = {
+                        TextButton(onClick = { disconnectSession(); pair = null; pending = null; offer = null; batchOffer = null; transfer = null; sendQueue = null; dialog = null; settingsOpen = false; message = "Dispositivo olvidado en este teléfono." }) { Text("Olvidar") }
+                    }, dismissButton = { TextButton(onClick = { dialog = null }) { Text("Volver") } })
                 }
             }
         }

@@ -18,6 +18,13 @@ object TransferDiagnostics {
         val causes = generateSequence<Throwable>(error) { it.cause }.take(5).toList()
         val errno = causes.filterIsInstance<ErrnoException>().firstOrNull()?.errno
         val code = (error as? ReceiveStorageException)?.code ?: when (error) {
+            is InvalidDescriptor -> "invalid_descriptor"
+            is RetryPeerMismatch -> "retry_peer_mismatch"
+            is ProtocolException -> when (error.code) {
+                "pairing_denied" -> "pairing_denied"
+                "already_paired" -> "already_paired"
+                else -> "operation_failed"
+            }
             is InterruptedIOException -> "interrupted"
             is SecurityException -> "permission_denied"
             is IOException -> "io_error"
@@ -30,9 +37,9 @@ object TransferDiagnostics {
         if (error is ReceiveStorageException) return error.message ?: "No se pudo guardar el archivo. Elige otra carpeta."
         if (cancelled) return "Transferencia cancelada."
         if (error is SendSelectionException) return requireNotNull(error.message)
-        if (stage == "pair") return "No se pudo emparejar. Comprueba la conexión o genera otro QR en el PC si ha caducado; también puedes usar el JSON manual."
+        if (stage == "pair") return "No se pudo emparejar. Comprueba la red y abre un nuevo QR o código en el PC."
         if (stage == "publish") return "Se recibió el archivo, pero no se pudo guardar en el destino. Comprueba el espacio y vuelve a elegir la carpeta."
         if (error is SecurityException) return "Se perdió un permiso de acceso. Vuelve a elegir el archivo o la carpeta."
-        return "No se pudo completar la operación. Comprueba la conexión y vuelve a intentarlo. Puedes copiar el diagnóstico para revisar el fallo."
+        return "No se pudo completar la operación. Comprueba la conexión y vuelve a intentarlo. Puedes copiar el diagnóstico en Ajustes."
     }
 }

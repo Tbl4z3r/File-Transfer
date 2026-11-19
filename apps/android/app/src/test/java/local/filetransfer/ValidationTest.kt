@@ -5,6 +5,7 @@ import org.junit.Assert.*
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
+import java.util.Base64
 
 class ValidationTest {
     @Test fun sharedVectors() {
@@ -46,6 +47,42 @@ class ValidationTest {
         }
         assertEquals("Invalid scans must not start a connection", 1, connections)
     }
+    @Test fun compactConnectionDecodesToTheSameDescriptorAsLegacyJson() {
+        val vector = JSONObject(File("../../../protocol/fixtures/h1-vectors.json").readText())
+            .getJSONObject("compact_connection")
+        val expected = Descriptor.parse(vector.getJSONObject("descriptor").toString())
+        assertEquals(expected, withValidatedDescriptor(vector.getString("code")) { it })
+    }
+
+    @Test fun rejectsMalformedCompactConnectionBeforeConnecting() {
+        val code = JSONObject(File("../../../protocol/fixtures/h1-vectors.json").readText())
+            .getJSONObject("compact_connection").getString("code")
+        val bytes = Base64.getUrlDecoder().decode(code.removePrefix("FT1-"))
+        fun changed(offset: Int, value: Int): String {
+            val altered = bytes.copyOf()
+            altered[offset] = value.toByte()
+            return "FT1-" + Base64.getUrlEncoder().withoutPadding().encodeToString(altered)
+        }
+        val invalid = listOf(
+            code.replace("FT1-", "FT2-"), code + "=", code.dropLast(1), code + "A",
+            code.replace("_", "/"), code.take(12) + "\n" + code.drop(12), code.dropLast(1) + "9",
+            changed(0, 224), changed(4, 0), changed(12, 0), changed(14, 0),
+        )
+        for (input in invalid) {
+            assertThrows(InvalidDescriptor::class.java) {
+                withValidatedDescriptor(input) { fail("Invalid code started a connection") }
+            }
+        }
+    }
+
+    @Test fun acceptsDeviceNamesWithinThePairingProtocolLimits() {
+        assertTrue(Validation.deviceName("Teléfono personal"))
+        assertTrue(Validation.deviceName("📱".repeat(64)))
+        assertFalse(Validation.deviceName("📱".repeat(65)))
+        assertFalse(Validation.deviceName("Teléfono\npersonal"))
+        assertFalse(Validation.deviceName(""))
+    }
+
     @Test fun rejectInvalidDescriptorAndNames() {
         assertFalse(Validation.ipv4("192.168.01.1")); assertFalse(Validation.ipv4("224.0.0.1")); assertFalse(Validation.name("COM³.txt")); assertEquals(4294967297, Validation.size("4294967297"))
     }

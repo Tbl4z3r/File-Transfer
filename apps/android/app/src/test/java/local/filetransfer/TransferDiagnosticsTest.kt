@@ -14,6 +14,14 @@ class TransferDiagnosticsTest {
         listOf("private.pdf", "secret", "bearer", "192.168.1.3", "content://", "/data/").forEach { assertFalse(report.contains(it)) }
     }
 
+    @Test fun remoteErrorCodeIsNeverCopiedUnlessKnown() {
+        val sensitive = "FT1-connection-code"
+        val report = TransferDiagnostics.render("pair", ProtocolException(sensitive), "test", "test device")
+        assertFalse(report.contains(sensitive))
+        assertTrue(report.contains("operation_failed"))
+        assertTrue(TransferDiagnostics.render("pair", ProtocolException("pairing_denied"), "test", "test device").contains("pairing_denied"))
+    }
+
     @Test fun causeChainIsBoundedAndStorageCodeIsActionable() {
         var error: Exception = IOException("ignored")
         repeat(20) { error = IOException("ignored", error) }

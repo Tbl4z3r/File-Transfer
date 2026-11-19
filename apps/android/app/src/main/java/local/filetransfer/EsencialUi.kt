@@ -17,6 +17,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -80,12 +81,26 @@ internal fun Glyph(name: String, modifier: Modifier = Modifier, tint: Color = Ma
                 line(15f, 15f, 18f, 15f); line(18f, 15f, 18f, 18f); line(21f, 15f, 21f, 21f); line(15f, 18f, 15f, 21f); line(15f, 21f, 18f, 21f)
             }
             "settings" -> {
-                line(4f, 6f, 20f, 6f); line(4f, 12f, 20f, 12f); line(4f, 18f, 20f, 18f)
-                box(7f, 4f, 3f, 4f); box(14f, 10f, 3f, 4f); box(7f, 16f, 3f, 4f)
+                val outline = Path().apply {
+                    val tooth = listOf(-0.5 to 7.5f, -0.25 to 9.5f, 0.25 to 9.5f, 0.5 to 7.5f)
+                    for (i in 0 until 8) {
+                        tooth.forEachIndexed { point, (step, radius) ->
+                            val angle = (i + step) * Math.PI / 4
+                            val x = (12f + radius * kotlin.math.cos(angle)).toFloat() * scale
+                            val y = (12f + radius * kotlin.math.sin(angle)).toFloat() * scale
+                            if (i == 0 && point == 0) moveTo(x, y) else lineTo(x, y)
+                        }
+                    }
+                    close()
+                }
+                drawPath(outline, tint, style = Stroke(1.5f * scale))
+                drawCircle(tint, 3.3f * scale, p(12f, 12f), style = Stroke(1.5f * scale))
             }
             "pc" -> { box(3f, 4f, 18f, 13f); line(12f, 17f, 12f, 21f); line(8f, 21f, 16f, 21f) }
             "open" -> { box(4f, 8f, 13f, 12f); line(12f, 4f, 20f, 4f); line(20f, 4f, 20f, 12f); line(20f, 4f, 11f, 13f) }
             "folder" -> { line(3f, 7f, 3f, 20f); line(3f, 20f, 21f, 20f); line(21f, 20f, 21f, 7f); line(21f, 7f, 11f, 7f); line(11f, 7f, 9f, 4f); line(9f, 4f, 3f, 4f); line(3f, 4f, 3f, 7f) }
+            "back" -> { line(19f, 12f, 5f, 12f); line(5f, 12f, 12f, 5f); line(5f, 12f, 12f, 19f) }
+            "edit" -> { line(5f, 19f, 7f, 13f); line(7f, 13f, 16f, 4f); line(16f, 4f, 20f, 8f); line(20f, 8f, 11f, 17f); line(11f, 17f, 5f, 19f) }
             "chevron" -> { line(9f, 6f, 15f, 12f); line(15f, 12f, 9f, 18f) }
             "send" -> { line(5f, 19f, 19f, 5f); line(9f, 5f, 19f, 5f); line(19f, 5f, 19f, 15f) }
             "receive" -> { line(19f, 5f, 5f, 19f); line(5f, 9f, 5f, 19f); line(5f, 19f, 15f, 19f) }
@@ -109,12 +124,12 @@ private fun SectionTitle(text: String) {
 
 @Composable
 internal fun EsencialScreen(
-    pairedName: String?, pairedHost: String?, destination: String, busy: Boolean, busyLabel: String, cancellable: Boolean, message: String,
+    pairedName: String?, pairedHost: String?, deviceName: String, destination: String, busy: Boolean, busyLabel: String, cancellable: Boolean, message: String,
     transfer: TransferPresentation?, sendQueue: SendQueueProgress?, offer: Transfer?, batchOffer: DownloadOfferBatch?, activity: List<TransferPresentation>,
-    hasPending: Boolean, hasDiagnostic: Boolean, canRetrySend: Boolean, canRetryInbox: Boolean,
-    onSettings: () -> Unit, onScan: () -> Unit, onFolder: () -> Unit,
+    hasPending: Boolean, canRetrySend: Boolean, canRetryInbox: Boolean,
+    onSettings: () -> Unit, onEditName: () -> Unit, onScan: () -> Unit, onFolder: () -> Unit,
     onSend: () -> Unit, onReceive: () -> Unit, onAccept: () -> Unit, onDetail: () -> Unit, onDecline: () -> Unit,
-    onCancel: () -> Unit, onRetry: () -> Unit, onDismissPending: () -> Unit, onDiagnostic: () -> Unit,
+    onCancel: () -> Unit, onRetry: () -> Unit, onDismissPending: () -> Unit,
     onRetrySend: () -> Unit, onRetryInbox: () -> Unit,
     onActivity: () -> Unit, onOpenReceived: (ReceivedDocument) -> Unit, onOpenLocation: (ReceiveLocation) -> Unit,
 ) {
@@ -130,6 +145,17 @@ internal fun EsencialScreen(
             }
             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Surface(onClick = onEditName, enabled = !busy, shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, colors.outlineVariant), modifier = Modifier.semantics { contentDescription = "Editar nombre del teléfono" }) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Nombre del teléfono", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                            Text(deviceName, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Glyph("edit")
+                    }
+                }
                 Surface(shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, colors.outlineVariant)) {
                     Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         if (pairedHost == null) {
@@ -215,7 +241,6 @@ internal fun EsencialScreen(
                     Text(busyLabel, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
-                if (hasDiagnostic) TextButton(onClick = onDiagnostic) { Text("Copiar diagnóstico") }
                 if (pairedHost != null || activity.isNotEmpty()) {
                     Column {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
