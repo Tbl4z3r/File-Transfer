@@ -225,8 +225,10 @@ fn main() {
         .setup(|app| {
             let directory = app.path().app_data_dir()?;
             let core = Engine::open_ephemeral(directory, "PC personal")?;
-            let window = app.get_window("main").ok_or("missing main window")?;
-            app.manage(taskbar::start(window, core.clone()));
+            let window = app
+                .get_webview_window("main")
+                .ok_or("missing main window")?;
+            app.manage(taskbar::start(window.as_ref().window(), core.clone()));
             app.manage(core);
             Ok(())
         })
