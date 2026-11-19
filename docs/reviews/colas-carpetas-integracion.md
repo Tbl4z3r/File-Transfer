@@ -14,5 +14,6 @@ Windows guarda las rutas de la selección y vuelve a revisar los archivos al env
 
 - El núcleo Rust pasa 42 pruebas y clippy con advertencias tratadas como errores. La prueba de humo con TLS real en Linux verificó 16 MiB por operación, consentimiento, colisiones y revocación.
 - La interfaz Windows pasa 78 pruebas y el cálculo del progreso nativo pasa dos pruebas separadas en Linux.
-- La prueba cruzada usa el cliente Kotlin contra el núcleo Rust real. Comprueba las rutas anunciadas, los tamaños, el consentimiento, la publicación verificada dentro de carpetas nuevas y las ofertas compuestas solo por carpetas vacías.
+- La primera candidatura integrada pasó 72 pruebas JVM, incluida la prueba cruzada del cliente Kotlin contra el núcleo Rust real. Comprueba rutas anunciadas, tamaños, consentimiento, publicación verificada dentro de carpetas nuevas y ofertas compuestas solo por carpetas vacías.
+- El ajuste final de importación pasó 15 pruebas focalizadas. Comprueban que una fuente lenta permite pausar y cancelar la cola, y que dos importaciones que compiten por la última plaza conservan la selección que obtuvo la plaza.
 - Las pruebas en el Explorador, la barra de tareas de Windows, Android 9/J4+, Redmi, el menú de compartir y proveedores SAF reales requieren los respectivos sistemas. Los pasos están en [Probar la rama](../TRY-PRUEBA.md).
