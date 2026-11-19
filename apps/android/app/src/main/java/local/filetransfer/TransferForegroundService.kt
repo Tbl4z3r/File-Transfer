@@ -88,7 +88,6 @@ class TransferForegroundService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private val deadline = Runnable { cancelAndStop(true) }
     private var startedId: Long? = null
-    private var ownedStartId = 0
     private var stopping = false
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -128,7 +127,6 @@ class TransferForegroundService : Service() {
             }
             main.postDelayed(deadline, ActiveTransfer.MAX_DURATION_MS)
             startedId = requestedId
-            ownedStartId = startId
             ActiveTransfer.ready(startedId)
         } catch (error: Exception) {
             ActiveTransfer.failed(requestedId, error)
@@ -140,7 +138,7 @@ class TransferForegroundService : Service() {
     }
 
     // Android 15+ may exhaust the shared dataSync budget before our local deadline.
-    override fun onTimeout(startId: Int, fgsType: Int) { if (startId == ownedStartId) cancelAndStop(true) }
+    override fun onTimeout(startId: Int, fgsType: Int) { cancelAndStop(true) }
 
     private fun cancelAndStop(timeout: Boolean, id: Long? = startedId) {
         if (id == null || id != ActiveTransfer.currentId) return

@@ -607,7 +607,7 @@ class MainActivity : ComponentActivity() {
                         val inbox = c.inbox()
                         pollHealth.success()
                         updateUi {
-                            if (!disposed.get() && session.generation == generation && pair == p && !busy && pending == null) {
+                            if (!disposed.get() && session.generation == generation && pollEpoch == session.operationEpoch && pair == p && !busy && pending == null) {
                                 if (dialog == "batch_detail" && batchOffer != inbox.batch) dialog = null
                                 offer = inbox.transfer
                                 batchOffer = inbox.batch
