@@ -131,6 +131,7 @@ class MainActivity : ComponentActivity() {
     private fun disconnectSession(preserveRetry: Boolean = false, notifyPeer: Boolean = true) {
         val p = session.pair.value
         if (session.manualDispatch.value.isNotEmpty() || session.busy.value && operationStage == "send") {
+            session.cancelled = true
             runCatching { session.outgoingStore?.arm(false); session.outgoingStore?.let { session.outgoing.value = it.state } }
         }
         session.generation++

@@ -74,7 +74,7 @@ internal class OutgoingQueueStore(private val directory: File) {
     fun file(entry: OutgoingFile) = File(directory, "${entry.id}.bin")
 
     /** Whole selection commits together. Temporary grants are consumed now, with bounded memory. */
-    @Synchronized fun importFiles(
+    fun importFiles(
         sources: List<OutgoingSource>, arm: Boolean, peer: RetryPeer? = null, directories: List<String> = emptyList(), cancelled: () -> Boolean,
     ): OutgoingState {
         if (sources.isEmpty() && directories.isEmpty()) return state
@@ -106,9 +106,13 @@ internal class OutgoingQueueStore(private val directory: File) {
             check(!cancelled()) { "Cancelada" }
             if (directories.isNotEmpty()) try { uploadManifest(imported.map { UploadFile(it.name, it.size, it.relativePath) }, directories) }
             catch (_: IllegalArgumentException) { throw SendSelectionException("Los nombres de la carpeta superan el límite del lote. Selecciona una carpeta más pequeña o cambia los nombres.") }
-            val next = OutgoingState(state.files + imported, state.folders + listOfNotNull(folder))
-            save(next)
-            return state
+            return synchronized(this) {
+                check(!cancelled()) { "Cancelada" }
+                if (state.files.size + imported.size > 64 || state.folders.sumOf { it.directories.size } + directories.size > 64)
+                    throw SendSelectionException("La cola cambió mientras se copiaban archivos. Envía o elimina algunos y vuelve a seleccionarlos.")
+                save(OutgoingState(state.files + imported, state.folders + listOfNotNull(folder)))
+                state
+            }
         } catch (error: Exception) {
             created.forEach { it.delete() }
             throw error

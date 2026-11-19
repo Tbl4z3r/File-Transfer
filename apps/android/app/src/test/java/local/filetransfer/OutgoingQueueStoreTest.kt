@@ -200,4 +200,71 @@ class OutgoingQueueStoreTest {
         split.forEach { group -> if (group.fileIds.size > 1) uploadManifest(loose.filter { it.id in group.fileIds }.map { UploadFile(it.name, it.size) }) }
     }
 
+    @Test fun pausingQueueDoesNotWaitForBlockedSourceAndCancellationCannotCommit() {
+        val store = OutgoingQueueStore(temporary.newFolder())
+        store.importFiles(listOf(source("previous.txt")), true) { false }
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val copy = pool.submit<OutgoingState> {
+                store.importFiles(listOf(OutgoingSource("blocked.txt") {
+                    object : InputStream() {
+                        override fun read(): Int = error("buffer expected")
+                        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                            entered.countDown()
+                            check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                            return -1
+                        }
+                    }
+                }), true) { cancelled.get() }
+            }
+            assertTrue(entered.await(2, java.util.concurrent.TimeUnit.SECONDS))
+            cancelled.set(true)
+            pool.submit { store.arm(false) }.get(1, java.util.concurrent.TimeUnit.SECONDS)
+            release.countDown()
+            assertTrue(runCatching { copy.get(2, java.util.concurrent.TimeUnit.SECONDS) }.isFailure)
+            assertEquals(listOf("previous.txt"), store.state.files.map { it.name })
+            assertFalse(store.state.armed)
+        } finally {
+            release.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test fun concurrentImportsRecheckCapacityAndRollBackOnlyLosingSelection() {
+        val root = temporary.newFolder()
+        val store = OutgoingQueueStore(root)
+        store.importFiles(List(63) { source("prior$it.txt") }, false) { false }
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val pool = java.util.concurrent.Executors.newSingleThreadExecutor()
+        try {
+            val blocked = pool.submit<OutgoingState> {
+                store.importFiles(listOf(OutgoingSource("blocked.txt") {
+                    object : InputStream() {
+                        override fun read(): Int = error("buffer expected")
+                        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                            entered.countDown()
+                            check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                            return -1
+                        }
+                    }
+                }), false) { false }
+            }
+            assertTrue(entered.await(2, java.util.concurrent.TimeUnit.SECONDS))
+            store.importFiles(listOf(source("winner.txt")), false) { false }
+            release.countDown()
+            assertTrue(runCatching { blocked.get(2, java.util.concurrent.TimeUnit.SECONDS) }.isFailure)
+            assertEquals(64, store.state.files.size)
+            assertTrue(store.state.files.any { it.name == "winner.txt" })
+            assertFalse(store.state.files.any { it.name == "blocked.txt" })
+            assertEquals(store.state, OutgoingQueueStore(root).state)
+            assertEquals(65, root.list()!!.size)
+        } finally {
+            release.countDown(); pool.shutdownNow()
+        }
+    }
+
 }
