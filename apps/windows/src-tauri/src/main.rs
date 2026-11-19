@@ -3,7 +3,7 @@ mod network;
 mod taskbar;
 mod taskbar_progress;
 use file_transfer_core::{
-    BatchStatus, Engine, Snapshot, SourceStamp,
+    BatchStatus, Engine, FolderSelection, SelectedSource, Snapshot, SourceStamp,
     model::{Descriptor, Transfer},
 };
 use std::{net::Ipv4Addr, path::PathBuf, sync::Arc};
@@ -129,13 +129,7 @@ fn cancel_download_batch(core: Core<'_>, batch_id: String) -> Result<BatchStatus
 fn cancel_transfer(core: Core<'_>, transfer_id: String) -> Result<Transfer, String> {
     core.cancel(&transfer_id).map_err(|e| e.code.to_owned())
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ChosenSource {
-    source: PathBuf,
-    file_name: String,
-    #[serde(flatten)]
-    stamp: SourceStamp,
-}
+type ChosenSource = SelectedSource;
 #[tauri::command]
 async fn choose_sources(app: tauri::AppHandle) -> Result<Option<Vec<ChosenSource>>, String> {
     let paths = app
@@ -155,40 +149,57 @@ async fn choose_sources(app: tauri::AppHandle) -> Result<Option<Vec<ChosenSource
         None => Ok(None),
     }
 }
-// Shared entry point for native drops and the file picker. A future folder picker
-// can expand directories here without teaching the UI about filesystem traversal.
 #[tauri::command]
 async fn inspect_sources(paths: Vec<PathBuf>) -> Result<Vec<ChosenSource>, String> {
-    tauri::async_runtime::spawn_blocking(move || inspect_paths(paths))
+    inspect_selection(paths)
         .await
-        .map_err(|_| "io_error".to_owned())?
+        .map(|selection| selection.sources)
 }
-fn inspect_paths(paths: Vec<PathBuf>) -> Result<Vec<ChosenSource>, String> {
-    paths
-        .into_iter()
-        .map(|source| {
-            let file = std::fs::File::open(&source).map_err(|_| "io_error".to_owned())?;
-            let metadata = file.metadata().map_err(|_| "io_error".to_owned())?;
-            if !metadata.is_file() {
-                return Err("files_only".to_owned());
-            }
-            let file_name = source
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| "invalid_name".to_owned())?
-                .to_owned();
-            Ok(ChosenSource {
-                source,
-                file_name,
-                stamp: SourceStamp::new(
-                    metadata.len(),
-                    metadata.modified().map_err(|_| "io_error".to_owned())?,
-                ),
-            })
-        })
-        .collect()
+#[tauri::command]
+async fn inspect_selection(paths: Vec<PathBuf>) -> Result<FolderSelection, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        file_transfer_core::inspect_selection(paths).map_err(|e| e.code.to_owned())
+    })
+    .await
+    .map_err(|_| "io_error".to_owned())?
 }
-
+#[tauri::command]
+async fn choose_source_folder(app: tauri::AppHandle) -> Result<Option<FolderSelection>, String> {
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("Elige la carpeta que quieres enviar")
+        .blocking_pick_folder()
+        .map(|path| path.into_path().map_err(|_| "io_error".to_owned()))
+        .transpose()?;
+    match selected {
+        Some(path) => inspect_selection(vec![path]).await.map(Some),
+        None => Ok(None),
+    }
+}
+#[tauri::command]
+async fn validate_folder_selection(selection: FolderSelection) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        selection.validate().map_err(|e| e.code.to_owned())
+    })
+    .await
+    .map_err(|_| "io_error".to_owned())?
+}
+#[tauri::command]
+async fn offer_folder_selection(
+    core: Core<'_>,
+    peer_id: String,
+    selection: FolderSelection,
+    session_id: String,
+) -> Result<BatchStatus, String> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        core.offer_folder_selection(&peer_id, selection, &session_id)
+            .map_err(|e| e.code.to_owned())
+    })
+    .await
+    .map_err(|_| "offer_uncertain".to_owned())?
+}
 #[tauri::command]
 async fn available_retry_sources(sources: Vec<ChosenSource>) -> Result<Vec<ChosenSource>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -260,6 +271,10 @@ fn main() {
             cancel_transfer,
             choose_sources,
             inspect_sources,
+            inspect_selection,
+            choose_source_folder,
+            validate_folder_selection,
+            offer_folder_selection,
             available_retry_sources,
             choose_destination
         ])

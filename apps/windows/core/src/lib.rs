@@ -1,4 +1,6 @@
 mod download_batch;
+mod folders;
+pub use folders::{FolderSelection, SelectedDirectory, SelectedSource, inspect_selection};
 pub mod model;
 mod server;
 mod store;
@@ -30,6 +32,7 @@ pub use server::SessionInfo;
 #[derive(Clone, Serialize)]
 pub struct Peer {
     pub supports_inbox: bool,
+    pub supports_folders: bool,
     pub id: String,
     pub name: String,
 }
@@ -108,6 +111,7 @@ struct Record {
     cancel: CancellationToken,
     temp: Option<NamedTempFile>,
     directory: Option<PathBuf>,
+    folder_paths: bool,
     published: Option<PathBuf>,
     source: Option<Source>,
     final_bytes_released: bool,
@@ -133,6 +137,7 @@ struct Inner {
     download_batch: Option<upload_batch::SessionBatch>,
     peer_activity: HashMap<String, Instant>,
     inbox_peers: HashSet<String>,
+    folder_peers: HashSet<String>,
 }
 pub struct Engine {
     directory: PathBuf,
@@ -227,6 +232,7 @@ impl Engine {
                 download_batch: None,
                 peer_activity: HashMap::new(),
                 inbox_peers: HashSet::new(),
+                folder_peers: HashSet::new(),
             }),
             timeouts,
             ephemeral_peers,
@@ -286,6 +292,7 @@ impl Engine {
         }
         inner.peer_activity.clear();
         inner.inbox_peers.clear();
+        inner.folder_peers.clear();
     }
     pub fn open_pairing_window(&self) -> Result<Descriptor> {
         let mut inner = self.lock();
@@ -336,6 +343,7 @@ impl Engine {
         }
         inner.peer_activity.remove(id);
         inner.inbox_peers.remove(id);
+        inner.folder_peers.remove(id);
         let ids: Vec<_> = inner
             .records
             .iter()
@@ -366,7 +374,12 @@ impl Engine {
         Self::ensure_authenticated(&inner, peer)?;
         self.revoke_peer_locked(&mut inner, &peer.id, "revoked")
     }
-    fn pair(&self, request: PairRequest, supports_inbox: bool) -> Result<PairResponse> {
+    fn pair(
+        &self,
+        request: PairRequest,
+        supports_inbox: bool,
+        supports_folders: bool,
+    ) -> Result<PairResponse> {
         if !valid_id(&request.device_id) || !valid_device_name(&request.device_name) {
             return Err(Fault::new(400, "invalid_request"));
         }
@@ -412,6 +425,9 @@ impl Engine {
         }
         if supports_inbox {
             inner.inbox_peers.insert(request.device_id.clone());
+        }
+        if supports_inbox && supports_folders {
+            inner.folder_peers.insert(request.device_id.clone());
         }
         inner
             .peer_activity
@@ -597,6 +613,7 @@ impl Engine {
             cancel: CancellationToken::new(),
             temp: None,
             directory: None,
+            folder_paths: false,
             published: None,
             source,
             final_bytes_released: false,
@@ -725,6 +742,9 @@ impl Engine {
         destination: &Path,
     ) -> Result<Transfer> {
         let record = &inner.records[index];
+        if inner.records[index].folder_paths {
+            folders::no_links(destination)?;
+        }
         let directory = fs::canonicalize(destination).map_err(|e| io_fault(&e))?;
         if !directory.is_dir() {
             return Err(Fault::new(500, "io_error"));
@@ -844,7 +864,12 @@ impl Engine {
                 .map_err(|e| io_fault(&e)),
             Direction::Download => {
                 let source = record.source.as_ref().unwrap();
-                match File::open(&source.path) {
+                let safe = if record.folder_paths {
+                    folders::no_links(&source.path)
+                } else {
+                    Ok(())
+                };
+                match safe.and_then(|()| File::open(&source.path).map_err(|e| io_fault(&e))) {
                     Ok(file) => {
                         let metadata = file.metadata().map_err(|e| io_fault(&e))?;
                         if metadata.len() != source.len
@@ -855,7 +880,7 @@ impl Engine {
                             Ok(file)
                         }
                     }
-                    Err(error) => Err(io_fault(&error)),
+                    Err(error) => Err(error),
                 }
             }
         };
@@ -955,6 +980,14 @@ impl Engine {
             return Ok(record.transfer.clone());
         }
         if record.transfer.direction == Direction::Upload {
+            if let Err(error) = if record.folder_paths {
+                folders::no_links(record.directory.as_ref().unwrap())
+            } else {
+                Ok(())
+            } {
+                self.terminate(&mut inner, id, TransferState::Failed, error.code);
+                return Err(error);
+            }
             let temp = record.temp.take().ok_or(Fault::new(500, "io_error"))?;
             let old_path = temp.path().to_path_buf();
             match store::publish(
@@ -995,6 +1028,7 @@ impl Engine {
                 .iter()
                 .map(|p| Peer {
                     supports_inbox: inner.inbox_peers.contains(&p.id),
+                    supports_folders: inner.folder_peers.contains(&p.id),
                     id: p.id.clone(),
                     name: p.name.clone(),
                 })
@@ -1098,6 +1132,7 @@ mod session_tests {
                     device_name: "Prueba".into(),
                     pairing_token: token,
                 },
+                false,
                 false,
             )
             .unwrap();

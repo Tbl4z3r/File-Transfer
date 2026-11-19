@@ -913,3 +913,6 @@ mod upload_batches;
 
 #[path = "support/download_batches.rs"]
 mod download_batches;
+
+#[path = "support/folder_batches.rs"]
+mod folder_batches;

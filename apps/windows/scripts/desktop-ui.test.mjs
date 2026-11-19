@@ -1026,7 +1026,8 @@ const queueTargets = (h) => queueRows(h)[0].querySelector(".waiting-targets").qu
 const queueSend = (h) => queueRows(h)[0].querySelector('[data-queue-action="send"]');
 function queueHandler(h, extra = () => {}) {
   h.onInvoke(async (command, args) => {
-    if (command === "choose_sources" || command === "inspect_sources") return queueSources;
+    if (command === "choose_sources") return queueSources;
+    if (command === "inspect_selection") return { sources: queueSources, directories: [] };
     if (command === "available_retry_sources") return args.sources;
     if (command === "offer_download_batch") {
       const manifest = { batch_id: "queue-batch", state: "awaiting_acceptance", peer_id: args.peerId,
@@ -1093,7 +1094,7 @@ test("general native drop uses real paths, converts physical coordinates and nev
   assert.equal(h.element("waiting-panel").classList.contains("drop-target"), true);
   await h.drop({ type: "drop", paths, position: { x: 240, y: 100 } });
   assert.deepEqual(points, [[120, 50], [120, 50]]);
-  assert.deepEqual(Array.from(commands(h, "inspect_sources")[0].args.paths), paths);
+  assert.deepEqual(Array.from(commands(h, "inspect_selection")[0].args.paths), paths);
   assert.equal(queueSend(h).disabled, true);
   assert.equal(commands(h, "offer_download_batch").length, 0);
   h.pagehide();
@@ -1221,5 +1222,132 @@ test("a storage failure before authorization keeps queued choices and does not o
   queueTargets(h)[0].click(); queueSend(h).click(); await h.settle();
   assert.match(h.element("waiting-count").textContent, /2 archivos/);
   assert.match(h.element("notice").textContent, /guardar el estado/);
+  assert.equal(commands(h, "offer_download").length, 0);
+});
+
+const folderDirectories = ["Estudios", "Estudios/Apuntes", "Estudios/Vacia"].map((relative_path) => ({
+  source: `C:\\Users\\Personal\\${relative_path.replaceAll("/", "\\")}`, relative_path,
+}));
+const folderSelection = {
+  directories: folderDirectories,
+  sources: ["primero", "segundo"].map((name) => ({
+    source: `C:\\Users\\Personal\\Estudios\\Apuntes\\${name}`,
+    file_name: name, size_bytes: "3", modified: "1234567890", relative_path: `Estudios/Apuntes/${name}`,
+  })),
+};
+function folderHandler(h, selection = folderSelection) {
+  h.onInvoke(async (command, args) => {
+    if (command === "choose_source_folder" || command === "inspect_selection") return structuredClone(selection);
+    if (command === "available_retry_sources") return args.sources;
+    if (command === "offer_folder_selection") {
+      const manifest = {
+        batch_id: `folder-${commands(h, command).length}`, state: "awaiting_acceptance", peer_id: args.peerId,
+        directories: args.selection.directories.map((directory) => directory.relative_path),
+        files: args.selection.sources.map((source) => ({ ...source, transfer_id: null, state: "pending" })),
+      };
+      h.snapshot.download_batch = manifest;
+      return manifest;
+    }
+  });
+}
+
+test("empty folders can be selected offline, survive reload and explain why legacy phones cannot receive them", async () => {
+  const h = await ui(undefined, { session: null });
+  folderHandler(h, { sources: [], directories: folderDirectories });
+  h.element("send-folder").click(); await h.settle();
+  assert.match(h.element("waiting-count").textContent, /3 carpetas/);
+  assert.match(h.element("waiting-files").textContent, /Estudios\/Vacia/);
+  const restored = await ui(undefined, { peers }, { storage: h.storage });
+  assert.match(restored.element("waiting-files").textContent, /no admiten carpetas/);
+  assert.equal(queueTargets(restored)[0].disabled, true);
+  assert.equal(queueSend(restored).disabled, true);
+  assert.equal(commands(restored, "offer_download").length, 0);
+  assert.equal(commands(restored, "offer_download_batch").length, 0);
+});
+
+test("native folder drop keeps relative paths and empty directories in one approved manifest", async () => {
+  const h = await ui(undefined, { peers: [{ ...peers[1], supports_inbox: true, supports_folders: true }] });
+  folderHandler(h);
+  await h.drop({ type: "drop", paths: ["C:\\Users\\Personal\\Estudios"], position: { x: 40, y: 40 } },
+    h.element("device-choices").querySelector("button"));
+  const offer = commands(h, "offer_folder_selection")[0];
+  assert.equal(offer.args.peerId, "phone-b");
+  assert.equal(offer.args.selection.sources[0].relative_path, "Estudios/Apuntes/primero");
+  assert.equal(offer.args.selection.directories[2].relative_path, "Estudios/Vacia");
+  assert.equal(commands(h, "offer_download").length, 0);
+  assert.equal(commands(h, "offer_download_batch").length, 0);
+  assert.match(h.element("batch-directories").textContent, /Estudios\/Vacia/);
+  assert.match(h.element("batch-files").textContent, /Estudios\/Apuntes\/primero/);
+});
+
+test("a legacy-targeted folder drop stays queued and never degrades into loose files", async () => {
+  const h = await ui(undefined, { peers });
+  folderHandler(h);
+  await h.drop({ type: "drop", paths: ["C:\\Users\\Personal\\Estudios"], position: { x: 40, y: 40 } },
+    h.element("device-choices").querySelector("button"));
+  assert.match(h.element("waiting-files").textContent, /no admite carpetas/);
+  assert.equal(queueSend(h).disabled, true);
+  assert.equal(commands(h, "offer_folder_selection").length, 0);
+  assert.equal(commands(h, "offer_download").length, 0);
+  assert.equal(commands(h, "offer_download_batch").length, 0);
+});
+
+test("an incoming folder-only manifest stays visible and requires explicit local approval", async () => {
+  const incoming = { batch_id: "incoming-empty", peer_id: "phone-a", state: "awaiting_acceptance", files: [], directories: ["Vacia", "Vacia/Hija"] };
+  const h = await ui(undefined, { peers, upload_batch: incoming });
+  h.onInvoke(async (command) => {
+    if (command === "choose_destination") return "C:\\Received";
+    if (command === "accept_upload_batch") { h.snapshot.upload_batch.state = "completed"; return { state: "completed" }; }
+  });
+  assert.equal(h.element("batch-panel").classList.contains("hidden"), false);
+  assert.equal(h.element("accept-batch").hidden, false);
+  assert.match(h.element("batch-directories").textContent, /Vacia\/Hija/);
+  assert.equal(commands(h, "accept_upload_batch").length, 0);
+  h.element("accept-batch").click(); await h.settle();
+  assert.equal(commands(h, "accept_upload_batch").length, 1);
+  assert.match(h.element("batch-status").textContent, /Lote completado/);
+});
+
+test("folder retry keeps the tree, omits verified files and explains that a new root is created", async () => {
+  const h = await ui(undefined, { peers: [{ ...peers[0], supports_inbox: true, supports_folders: true }] });
+  folderHandler(h);
+  h.element("send-folder").click(); await h.settle();
+  queueTargets(h)[0].click(); queueSend(h).click(); await h.settle();
+  const first = h.snapshot.download_batch;
+  first.state = "failed";
+  first.files[0].state = "completed";
+  first.files[0].transfer_id = "verified-folder-file";
+  first.files[1].state = "not_sent";
+  await h.tick();
+  h.element("retry-send").click(); await h.settle();
+  assert.match(h.element("retry-hint").textContent, /raíz nueva/);
+  h.element("retry-devices").querySelector("button").click();
+  h.element("retry-confirm").click(); await h.settle();
+  const retried = commands(h, "offer_folder_selection")[1];
+  assert.equal(retried.args.selection.sources.length, 1);
+  assert.equal(retried.args.selection.sources[0].relative_path, "Estudios/Apuntes/segundo");
+  assert.equal(retried.args.selection.directories.length, 3);
+  assert.equal(commands(h, "offer_download").length, 0);
+});
+
+test("folder-only retry after a lost session requires checking the remote folder", async () => {
+  const h = await ui(undefined, { peers: [{ ...peers[0], supports_inbox: true, supports_folders: true }] });
+  folderHandler(h, { sources: [], directories: folderDirectories });
+  h.element("send-folder").click(); await h.settle();
+  queueTargets(h)[0].click(); queueSend(h).click(); await h.settle();
+  h.snapshot.session = null;
+  h.snapshot.download_batch = null;
+  await h.tick();
+  h.snapshot.session = { session_id: "new", host: "192.168.1.8", port: 54321 };
+  await h.tick();
+  h.element("retry-send").click(); await h.settle();
+  h.element("retry-devices").querySelector("button").click();
+  assert.equal(h.element("retry-confirm").disabled, true);
+  assert.equal(h.element("retry-uncertain").classList.contains("hidden"), false);
+  h.element("retry-include").checked = true;
+  h.element("retry-include").onchange();
+  assert.equal(h.element("retry-confirm").disabled, false);
+  h.element("retry-confirm").click(); await h.settle();
+  assert.equal(commands(h, "offer_folder_selection").length, 2);
   assert.equal(commands(h, "offer_download").length, 0);
 });

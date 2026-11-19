@@ -1,6 +1,6 @@
 import { encodeConnectionCode, type Descriptor } from "./pairing-code.js";
 import { encodePairingQr } from "./pairing-qr.js";
-type Peer = { id: string; name: string; supports_inbox: boolean };
+type Peer = { id: string; name: string; supports_inbox: boolean; supports_folders?: boolean };
 type Transfer = {
   transfer_id: string;
   direction: "upload" | "download";
@@ -16,6 +16,7 @@ type Transfer = {
 };
 type BatchFile = {
   file_name: string;
+  relative_path?: string;
   size_bytes: string;
   transfer_id: string | null;
   state: string;
@@ -25,13 +26,17 @@ type TransferBatch = {
   peer_id: string;
   state: string;
   files: BatchFile[];
+  directories?: string[];
 };
 type Source = {
   source: string;
   file_name: string;
   size_bytes: string;
   modified: string;
+  relative_path?: string;
 };
+type SelectedDirectory = { source: string; relative_path: string };
+type FolderSelection = { sources: Source[]; directories: SelectedDirectory[] };
 type BatchStatus = { batch_id: string; state: string };
 type Snapshot = {
   session: null | {
@@ -77,7 +82,9 @@ const messages: Record<string, string> = {
     "No se pudo acceder al archivo o abrir la conexión. Comprueba la carpeta, los permisos y que la IPv4 pertenezca a este PC.",
   insufficient_space:
     "No hay espacio suficiente en el destino. Elige otra carpeta o libera espacio.",
-  files_only: "Por ahora puedes añadir archivos. Elige los archivos dentro de la carpeta.",
+  offer_uncertain: "No se pudo confirmar si se ofrecieron las carpetas. Comprueba el destino antes de volver a enviarlas.",
+  folders_unsupported: "Este móvil no admite carpetas. Actualiza su aplicación o elige otro dispositivo.",
+  limit_exceeded: "La selección supera el límite de 64 archivos, 64 carpetas o el tamaño permitido del manifiesto. Elige una selección más pequeña.",
   source_changed:
     "El archivo de origen ha cambiado. Vuelve a seleccionarlo y enviarlo.",
   invalid_name:
@@ -121,6 +128,8 @@ type OutgoingAttempt = {
   peerId: string;
   sources: Source[];
   results: ("pending" | "completed" | "unfinished" | "uncertain")[];
+  directories?: SelectedDirectory[];
+  emptyFolderResult?: "pending" | "completed" | "unfinished" | "uncertain";
   manifestId?: string;
   queue?: SendBatch;
   finished: boolean;
@@ -279,6 +288,7 @@ type QueuedSelection = {
   target: QueueTarget | null;
   status: "pending" | "offering" | "review";
   autoOffer?: boolean;
+  directories?: SelectedDirectory[];
 };
 const queueKey = "file-transfer.waiting-files.v1";
 let queueStorageFailed = false;
@@ -288,7 +298,9 @@ function loadWaiting(): QueuedSelection[] {
     if (!Array.isArray(stored)) return [];
     return stored.filter((entry): entry is QueuedSelection =>
       entry && typeof entry.id === "string" && Array.isArray(entry.sources) &&
-      entry.sources.length > 0 && entry.sources.every((source: Source) =>
+      (entry.sources.length > 0 || entry.directories?.length > 0) &&
+      (!entry.directories || (Array.isArray(entry.directories) && entry.directories.every((dir: SelectedDirectory) =>
+        dir && typeof dir.source === "string" && typeof dir.relative_path === "string"))) && entry.sources.every((source: Source) =>
         source && typeof source.source === "string" && typeof source.file_name === "string" &&
         /^(0|[1-9][0-9]*)$/.test(source.size_bytes) && /^-?[0-9]+$/.test(source.modified),
       ) && ["pending", "offering", "review"].includes(entry.status),
@@ -310,8 +322,8 @@ function saveWaiting(): boolean {
     return false;
   }
 }
-function enqueueSources(sources: Source[], target: QueueTarget | null = null, autoOffer = false): QueuedSelection {
-  const selection: QueuedSelection = { id: crypto.randomUUID(), sources: sources.map((source) => ({ ...source })), target, autoOffer, status: "pending" };
+function enqueueSources(sources: Source[], target: QueueTarget | null = null, autoOffer = false, directories: SelectedDirectory[] = []): QueuedSelection {
+  const selection: QueuedSelection = { id: crypto.randomUUID(), sources: sources.map((source) => ({ ...source })), target, autoOffer, directories, status: "pending" };
   waiting.push(selection);
   saveWaiting();
   renderWaiting();
@@ -333,15 +345,17 @@ function renderWaiting(): void {
   waitingSignature = signature;
   const list = $("waiting-files");
   list.replaceChildren();
-  $("waiting-count").textContent = `${waiting.reduce((total, entry) => total + entry.sources.length, 0)} archivos en espera`;
+  const directoryCount = waiting.reduce((total, entry) => total + (entry.directories?.length ?? 0), 0);
+  $("waiting-count").textContent = `${waiting.reduce((total, entry) => total + entry.sources.length, 0)} archivos${directoryCount ? ` y ${directoryCount} carpetas` : ""} en espera`;
   if (!waiting.length) list.append(node("p", "hint", "Puedes elegir archivos o arrastrarlos desde el Explorador, incluso sin conexión."));
   for (const entry of waiting) {
+    const directories = entry.directories ?? [];
     const card = node("div", "waiting-selection");
     card.dataset.waitingId = entry.id;
     const files = node("ul", "batch-files");
     for (const [index, source] of entry.sources.entries()) {
       const row = node("li", "row batch-file");
-      const name = node("span", "grow", `${source.file_name} · ${formatBytes(BigInt(source.size_bytes))}`);
+      const name = node("span", "grow", `${source.relative_path ?? source.file_name} · ${formatBytes(BigInt(source.size_bytes))}`);
       name.title = source.source;
       const remove = node("button", "text-button", "Quitar");
       remove.type = "button";
@@ -349,12 +363,13 @@ function renderWaiting(): void {
       remove.setAttribute("aria-label", `Quitar ${source.file_name} de la cola`);
       remove.onclick = () => {
         entry.sources.splice(index, 1);
-        if (!entry.sources.length) removeWaiting(entry);
+        if (!entry.sources.length && !directories.length) removeWaiting(entry);
         else { saveWaiting(); renderWaiting(); }
       };
       row.append(name, remove);
       files.append(row);
     }
+    for (const directory of directories) files.append(node("li", "batch-file", `Carpeta: ${directory.relative_path}`));
     card.append(files);
     const targetValid = entry.target?.sessionId === sessionId &&
       latest?.peers.some((peer) => peer.id === entry.target?.peerId);
@@ -365,7 +380,7 @@ function renderWaiting(): void {
     for (const peer of latest?.session ? latest.peers : []) {
       const choose = node("button", "", `${peer.name} · ${peer.id.slice(0, 8)}`);
       choose.type = "button";
-      choose.disabled = busy || entry.status === "offering";
+      choose.disabled = busy || entry.status === "offering" || (directories.length > 0 && !peer.supports_folders);
       choose.setAttribute("aria-pressed", String(targetValid && entry.target?.peerId === peer.id));
       choose.onclick = () => {
         entry.target = { sessionId, peerId: peer.id, peerName: peer.name };
@@ -376,6 +391,10 @@ function renderWaiting(): void {
       choices.append(choose);
     }
     card.append(choices);
+    if (directories.length && latest?.peers.length && !latest.peers.some((peer) => peer.supports_folders))
+      card.append(node("p", "hint", "Los móviles conectados no admiten carpetas. Actualiza la aplicación del móvil para enviar esta selección."));
+    if (directories.length && targetValid && !latest?.peers.find((peer) => peer.id === entry.target?.peerId)?.supports_folders)
+      card.append(node("p", "hint", "Este móvil no admite carpetas. Actualiza su aplicación o elige otro dispositivo."));
     if (entry.status === "review") {
       card.append(node("p", "hint", "La aplicación se cerró mientras se ofrecía esta selección. Puede que el móvil ya la tenga. Comprueba su carpeta antes de volver a ofrecerla."));
       const review = node("button", "", "He comprobado el destino; preparar otro envío");
@@ -389,6 +408,7 @@ function renderWaiting(): void {
     send.type = "button";
     send.dataset.queueAction = "send";
     send.disabled = busy || entry.status !== "pending" || !targetValid ||
+      (directories.length > 0 && !latest?.peers.find((peer) => peer.id === entry.target?.peerId)?.supports_folders) ||
       !canOffer(sessionId, entry.target?.peerId ?? "");
     send.onclick = () => { void sendWaiting(entry); };
     const discard = node("button", "", "Eliminar selección");
@@ -402,7 +422,7 @@ function renderWaiting(): void {
   }
 }
 const knownOfferRejections = new Set(["busy", "session_closed", "revoked", "source_changed", "io_error",
-  "invalid_request", "invalid_name", "limit_exceeded", "invalid_state", "not_found", "desktop_required"]);
+  "invalid_request", "invalid_name", "limit_exceeded", "invalid_state", "not_found", "desktop_required", "folders_unsupported"]);
 function maybeOfferWaiting(): void {
   let changed = false;
   for (const entry of waiting) {
@@ -422,7 +442,9 @@ async function sendWaiting(entry: QueuedSelection): Promise<void> {
   if (!target || entry.status !== "pending" || busy || !canOffer(target.sessionId, target.peerId)) return;
   entry.autoOffer = false;
   await action(async () => {
-    const available = await invoke<Source[]>("available_retry_sources", { sources: entry.sources });
+    const directories = entry.directories ?? [];
+    if (directories.length) await invoke("validate_folder_selection", { selection: { sources: entry.sources, directories } });
+    const available = directories.length ? entry.sources : await invoke<Source[]>("available_retry_sources", { sources: entry.sources });
     if (available.length !== entry.sources.length) {
       notice("Algún archivo cambió o ya no está disponible. La selección sigue en espera: quítalo o vuelve a elegir los archivos.", true);
       return;
@@ -437,7 +459,7 @@ async function sendWaiting(entry: QueuedSelection): Promise<void> {
       return;
     }
     try {
-      await offerSelection(available, target.peerId, target.sessionId, true);
+      await offerSelection(available, target.peerId, target.sessionId, true, 0, directories);
       removeWaiting(entry); // Ownership now belongs to the existing transfer/retry flow.
     } catch (error) {
       entry.status = knownOfferRejections.has(String(error)) ? "pending" : "review";
@@ -479,9 +501,9 @@ function nativeDrop(event: NativeDrop): void {
   if (!paths.length) return;
   const target = peerId && latest?.session
     ? { peerId, peerName: peerName(peerId), sessionId: latest.session.session_id } : null;
-  void invoke<Source[]>("inspect_sources", { paths }).then(async (sources) => {
-    if (!sources.length) return;
-    enqueueSources(sources, target, Boolean(target));
+  void invoke<FolderSelection>("inspect_selection", { paths }).then((selection) => {
+    if (!selection.sources.length && !selection.directories.length) return;
+    enqueueSources(selection.sources, target, Boolean(target), selection.directories);
     maybeOfferWaiting();
   }).catch((error) => notice(messages[String(error)] ?? "No se pudieron añadir los archivos. Comprueba que sigan disponibles.", true));
 }
@@ -648,6 +670,7 @@ function updateControls(): void {
     Boolean(batch) ||
     offering;
   $<HTMLButtonElement>("queue-files").disabled = busy;
+  $<HTMLButtonElement>("send-folder").disabled = busy;
   renderWaiting();
   renderBatch();
   renderRetry();
@@ -735,6 +758,8 @@ function renderBatch(): void {
   const download = shownDownloadBatch;
   const outgoing = shownSendBatch;
   const files = incoming?.files ?? download?.files ?? outgoing?.sources ?? [];
+  const directories = incoming?.directories ?? download?.directories ?? [];
+  const hasManifest = Boolean(files.length || directories.length);
   const state = incoming?.state ?? download?.state ?? outgoing?.state ?? "";
   const key = incoming
     ? `in/${incoming.batch_id}`
@@ -744,12 +769,12 @@ function renderBatch(): void {
         ? `out/${outgoing.sessionId}/${outgoing.sources[0]?.source}`
         : "";
   const waiting = Boolean(incoming && state === "awaiting_acceptance");
-  $("batch-panel").classList.toggle("hidden", !files.length);
+  $("batch-panel").classList.toggle("hidden", !hasManifest);
   const accept = $<HTMLButtonElement>("accept-batch");
   const cancel = $<HTMLButtonElement>("cancel-batch");
   accept.hidden = !waiting;
   accept.disabled = busy || !waiting || !incomingReserved();
-  cancel.hidden = !files.length || terminal(state);
+  cancel.hidden = !hasManifest || terminal(state);
   cancel.disabled = busy || terminal(state) || (!incoming && !download && !batch);
   cancel.textContent = waiting ? "Rechazar lote" : "Cancelar lote";
   const retryReceive = $<HTMLButtonElement>("retry-receive-batch");
@@ -779,6 +804,8 @@ function renderBatch(): void {
           ? `${label} · ${completed} de ${files.length} verificados · ${peerName(outgoing.peerId)}`
           : `Archivo ${outgoing.index + 1} de ${files.length} · ${files.length - outgoing.index - 1} pendientes · ${peerName(outgoing.peerId)}`
         : "";
+  if (directories.length) $("batch-status").textContent += ` · ${directories.length} carpetas`;
+  $("batch-directories").textContent = directories.map((path) => `Carpeta: ${path}`).join("\n");
   const list = $("batch-files");
   if (batchListKey !== key || batchRows.length !== files.length) {
     batchListKey = key;
@@ -793,7 +820,7 @@ function renderBatch(): void {
     list.scrollTop = 0;
   }
   files.forEach((file, i) => {
-    batchRows[i].name.textContent = file.file_name;
+    batchRows[i].name.textContent = file.relative_path ?? file.file_name;
     batchRows[i].detail.textContent =
       `${formatBytes(BigInt(file.size_bytes))} · ${batchFileLabel(file, Boolean(incoming), state)}`;
   });
@@ -1284,6 +1311,7 @@ function retrySkipMessage(skipped: number): string {
 
 async function offerSelection(
   sources: Source[], peerId: string, sessionId: string, retry = false, skipped = 0,
+  directories: SelectedDirectory[] = [],
 ): Promise<void> {
   if (!canOffer(sessionId, peerId)) throw "busy";
   const attempt: OutgoingAttempt = {
@@ -1293,8 +1321,18 @@ async function offerSelection(
     sources,
     results: sources.map(() => "pending"),
     finished: false,
+    directories,
+    ...(directories.length && !sources.length ? { emptyFolderResult: "pending" as const } : {}),
   };
-  if (sources.length > 1 && latest?.peers.find((peer) => peer.id === peerId)?.supports_inbox) {
+  if (directories.length) {
+    if (!latest?.peers.find((peer) => peer.id === peerId)?.supports_folders) throw "folders_unsupported";
+    const manifest = await invoke<BatchStatus>("offer_folder_selection", { peerId, sessionId, selection: { sources, directories } });
+    attempt.manifestId = manifest.batch_id;
+    offerRevision++;
+    shownSendBatch = null;
+    shownUploadBatch = null;
+    notice("Oferta de carpetas enviada. Esperando aceptación en el móvil.");
+  } else if (sources.length > 1 && latest?.peers.find((peer) => peer.id === peerId)?.supports_inbox) {
     const manifest = await invoke<BatchStatus>("offer_download_batch", {
       peerId,
       sources: sources.map((source) => source.source),
@@ -1352,17 +1390,22 @@ function updateOutgoingAttempt(snapshot: Snapshot): void {
     if (!transfer || transfer.delivery_uncertain) return "uncertain";
     return transfer.state === "completed" ? "completed" : "unfinished";
   });
+  if (attempt.emptyFolderResult) attempt.emptyFolderResult = manifest?.state === "completed" ? "completed"
+    : finished ? (!sameSession ? "uncertain" : "unfinished") : "pending";
   attempt.finished = finished;
 }
 
 function renderRetry(): void {
   const attempt = outgoingAttempt;
   const results = attempt?.results ?? [];
-  const available = Boolean(attempt?.finished && results.some((state) => state !== "completed"));
+  const available = Boolean(attempt?.finished && (results.some((state) => state !== "completed") ||
+    (attempt.emptyFolderResult && attempt.emptyFolderResult !== "completed")));
   $("retry-summary").classList.toggle("hidden", !available);
   if (!available || !attempt) return;
   const count = results.filter((state) => state !== "completed").length;
-  $("retry-label").textContent = `${attempt.peerName} · ${count} sin confirmación de ${results.length} archivos`;
+  $("retry-label").textContent = attempt.emptyFolderResult
+    ? `${attempt.peerName} · Carpetas sin confirmación`
+    : `${attempt.peerName} · ${count} sin confirmación de ${results.length} archivos`;
   const retry = $<HTMLButtonElement>("retry-send");
   retry.disabled = busy || offering || Boolean(batch);
   const choices = $("retry-devices");
@@ -1374,7 +1417,7 @@ function renderRetry(): void {
       choices.replaceChildren(...peers.map((peer) => {
         const button = node("button", "", `${peer.name} · ${peer.id.slice(0, 8)}`);
         button.type = "button";
-        button.disabled = busy;
+        button.disabled = busy || Boolean(attempt.directories?.length && !peer.supports_folders);
         button.setAttribute("aria-pressed", String(peer.id === retryTarget));
         button.onclick = () => {
           retryTarget = peer.id;
@@ -1383,20 +1426,23 @@ function renderRetry(): void {
         return button;
       }));
     }
-    const uncertain = results.includes("uncertain");
+    const uncertain = results.includes("uncertain") || attempt.emptyFolderResult === "uncertain";
     $("retry-uncertain").classList.toggle("hidden", !uncertain);
     $("retry-uncertain-files").textContent = attempt.sources
       .filter((_, index) => results[index] === "uncertain")
-      .map((source) => source.file_name)
-      .join(", ");
+      .map((source) => source.relative_path ?? source.file_name)
+      .join(", ") || (attempt.emptyFolderResult === "uncertain"
+        ? attempt.directories?.map((directory) => directory.relative_path).join(", ") ?? "" : "");
     const originalPaired = peers.some((peer) => peer.id === attempt.peerId);
     $("retry-hint").textContent = originalPaired
       ? "Elige el móvil de destino. El móvil deberá aceptar un nuevo envío."
       : "Si tu móvil no aparece, vuelve a emparejarlo con un QR. Confirma el destino antes de ofrecer los archivos.";
     $<HTMLButtonElement>("retry-pair").hidden = originalPaired;
+    if (attempt.directories?.length) $("retry-hint").textContent += " Las carpetas se crearán en una raíz nueva; no se volverán a enviar los archivos verificados.";
     $<HTMLButtonElement>("retry-confirm").disabled = busy ||
+      Boolean(attempt.directories?.length && !peers.find((peer) => peer.id === retryTarget)?.supports_folders) ||
       !canOffer(latest?.session?.session_id ?? "", retryTarget) ||
-      (!results.includes("unfinished") && !$<HTMLInputElement>("retry-include").checked);
+      (!results.includes("unfinished") && attempt.emptyFolderResult !== "unfinished" && !$<HTMLInputElement>("retry-include").checked);
   }
 }
 
@@ -1418,6 +1464,7 @@ $("retry-confirm").onclick = () => {
   const peerId = retryTarget;
   if (!attempt?.finished || !canOffer(sessionId, peerId)) return;
   const includeUncertain = $<HTMLInputElement>("retry-include").checked;
+  if (attempt.emptyFolderResult === "uncertain" && !includeUncertain) return;
   void action(async () => {
     const requested = attempt.sources.filter((_, index) =>
       attempt.results[index] === "unfinished" ||
@@ -1426,15 +1473,23 @@ $("retry-confirm").onclick = () => {
     const sources = await invoke<Source[]>("available_retry_sources", { sources: requested });
     if (!canOffer(sessionId, peerId)) throw "busy";
     const skipped = requested.length - sources.length;
-    if (!sources.length) {
+    const directories = attempt.directories ?? [];
+    if (!sources.length && !attempt.emptyFolderResult) {
       notice("Los archivos pendientes ya no están disponibles o cambiaron. Selecciónalos de nuevo si quieres enviarlos.", true);
       return;
     }
-    await offerSelection(sources, peerId, sessionId, true, skipped);
+    if (directories.length) await invoke("validate_folder_selection", { selection: { sources, directories } });
+    await offerSelection(sources, peerId, sessionId, true, skipped, directories);
     $<HTMLDialogElement>("retry-panel").close();
   });
 };
 
+$("send-folder").onclick = () => {
+  void action(async () => {
+    const selection = await invoke<FolderSelection | null>("choose_source_folder");
+    if (selection) enqueueSources(selection.sources, null, false, selection.directories);
+  });
+};
 $("queue-files").onclick = () => { void chooseWaiting(); };
 $("send-file").onclick = () => {
   if (!latest?.session || !selectedPeer) { void chooseWaiting(); return; }
