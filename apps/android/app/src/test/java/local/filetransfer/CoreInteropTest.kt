@@ -129,6 +129,69 @@ class CoreInteropTest {
                 temp.delete()
             }
             assertEquals("completed", c.downloadBatchStatus(offeredBatch.id).state)
+
+            // A directory offer can contain only one file, or no files at all.
+            val treeDirectories = listOf("Estudios/Apuntes", "Estudios", "Estudios/Vacía")
+            val structure = c.createUploadBatch(
+                listOf(UploadFile("nota.txt", 3, relativePath = "Estudios/Apuntes/nota.txt")),
+                treeDirectories,
+            )
+            val beforeApproval = command("snapshot").getJSONObject("upload_batch")
+            assertEquals("Estudios/Apuntes/nota.txt", beforeApproval
+                .getJSONArray("files").getJSONObject(0).getString("relative_path"))
+            assertFalse(File(inbox, "Estudios").exists())
+            // An existing root stays untouched. The second copy uses a separate directory.
+            val existing = File(inbox, "Estudios").apply { mkdir() }
+            File(existing, "intacto.txt").writeText("anterior")
+            val approval = command("accept_upload_batch", "batch_id" to structure.id, "destination" to inbox.path)
+            assertEquals("accepted", approval.getString("state"))
+            val noteBytes = byteArrayOf(1, 2, 3)
+            val upload = c.startBatchFile(structure.id, 0)
+            val (_, hash) = c.uploadContent(upload.id, noteBytes.inputStream(), noteBytes.size.toLong()) {}
+            assertEquals("completed", c.complete(upload.id, hash).state)
+            assertEquals("completed", c.batchStatus(structure.id).state)
+            val receivedRoot = inbox.listFiles()!!.single { it.isDirectory && it != existing }
+            assertArrayEquals(noteBytes, File(receivedRoot, "Apuntes/nota.txt").readBytes())
+            assertTrue(File(receivedRoot, "Vacía").isDirectory)
+            assertEquals(listOf("intacto.txt"), existing.list()!!.toList())
+
+            val onlyFolders = c.createUploadBatch(emptyList(), listOf("Sin archivos", "Sin archivos/Interior"))
+            val approvedFolders = command("accept_upload_batch", "batch_id" to onlyFolders.id, "destination" to inbox.path)
+            assertEquals("completed", approvedFolders.getString("state"))
+            assertEquals("completed", c.batchStatus(onlyFolders.id).state)
+            assertTrue(File(inbox, "Sin archivos/Interior").isDirectory)
+
+            val outgoingRoot = File(root, "Colección").apply { mkdir() }
+            File(outgoingRoot, "Parte").mkdir()
+            val outgoingNote = File(outgoingRoot, "Parte/nota.txt").apply { writeBytes(noteBytes) }
+            File(outgoingRoot, "Vacía").mkdir()
+            val outgoing = command("offer_folder_batch", "peer_id" to id,
+                "sources" to JSONArray(listOf(outgoingRoot.path)), "session_id" to sessionId)
+            val outgoingOffer = requireNotNull(c.inbox().batch)
+            assertEquals(outgoing.getString("batch_id"), outgoingOffer.id)
+            assertEquals(setOf("Colección", "Colección/Parte", "Colección/Vacía"), outgoingOffer.directories.toSet())
+            val note = outgoingOffer.files.single()
+            assertEquals("Colección/Parte/nota.txt", note.relativePath)
+            assertEquals(outgoingNote.length(), note.size)
+            assertEquals("accepted", c.acceptDownloadBatch(outgoingOffer.id).state)
+            val readyNote = c.startDownloadBatchFile(outgoingOffer.id, 0)
+            requireReadyDownload(readyNote, note)
+            val copied = java.io.ByteArrayOutputStream()
+            val noteHash = c.downloadContent(readyNote.id, readyNote.size, copied) {}
+            assertArrayEquals(noteBytes, copied.toByteArray())
+            val noteDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+            while (c.status(readyNote.id).state == "streaming" && System.nanoTime() < noteDeadline) Thread.sleep(100)
+            assertEquals("completed", c.complete(readyNote.id, noteHash).state)
+            assertEquals("completed", c.downloadBatchStatus(outgoingOffer.id).state)
+
+            val vacantRoot = File(root, "Otra vacía").apply { mkdir() }
+            command("offer_folder_batch", "peer_id" to id,
+                "sources" to JSONArray(listOf(vacantRoot.path)), "session_id" to sessionId)
+            val vacantOffer = requireNotNull(c.inbox().batch)
+            assertEquals(listOf("Otra vacía"), vacantOffer.directories)
+            assertTrue(vacantOffer.files.isEmpty())
+            assertEquals("completed", c.acceptDownloadBatch(vacantOffer.id).state)
+
             c.disconnect()
             val expired = runCatching { c.inbox() }.exceptionOrNull() as ProtocolException
             assertEquals(401, expired.status)
