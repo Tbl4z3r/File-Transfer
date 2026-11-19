@@ -173,14 +173,22 @@ class CoreInteropTest {
             val note = outgoingOffer.files.single()
             assertEquals("Colección/Parte/nota.txt", note.relativePath)
             assertEquals(outgoingNote.length(), note.size)
+            val mobileInbox = File(root, "mobile-inbox").apply { mkdir() }
+            File(mobileInbox, "Colección").mkdir()
+            val mobileFolders = PrivateFolderPlan.prepare(mobileInbox, outgoingOffer.directories) { false }
+            assertTrue(mobileFolders.getValue("Colección/Vacía").isDirectory)
             assertEquals("accepted", c.acceptDownloadBatch(outgoingOffer.id).state)
             val readyNote = c.startDownloadBatchFile(outgoingOffer.id, 0)
             requireReadyDownload(readyNote, note)
-            val copied = java.io.ByteArrayOutputStream()
-            val noteHash = c.downloadContent(readyNote.id, readyNote.size, copied) {}
-            assertArrayEquals(noteBytes, copied.toByteArray())
+            val pendingNote = File(root, "note.part")
+            val noteHash = pendingNote.outputStream().use { c.downloadContent(readyNote.id, readyNote.size, it) {} }
             val noteDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
             while (c.status(readyNote.id).state == "streaming" && System.nanoTime() < noteDeadline) Thread.sleep(100)
+            assertEquals(noteHash, c.status(readyNote.id).sha256)
+            val publishedNote = PrivateInboxPublisher.publish(pendingNote,
+                mobileFolders.getValue("Colección/Parte"), note.name, note.size, noteHash)
+            assertArrayEquals(noteBytes, publishedNote.readBytes())
+            assertEquals(File(mobileInbox, "Colección (1)/Parte"), publishedNote.parentFile)
             assertEquals("completed", c.complete(readyNote.id, noteHash).state)
             assertEquals("completed", c.downloadBatchStatus(outgoingOffer.id).state)
 
