@@ -16,7 +16,8 @@ Estado: candidata para revisión de GPT-6.2. Rama `task/carpetas-android`, base 
 `source /workspace/toolchains/env.sh`; cache Gradle compartida existente, sin dependencias nuevas:
 
 - Primera corrida `:app:testDebugUnitTest`: 72 pruebas, 71 correctas, 1 omitida (`CoreInteropTest` sin binario), 0 fallos/errores. La compilación Kotlin también pasó. Incluye manifiestos con vacías/un archivo, padres con grafía incorrecta, traversal/colisiones/límites, capability/no fallback, vacío autorizado, snapshots/grupos/armado, partición por selección/JSON y publicación privada con colisión/enlace/cancelación.
-- Corrida final `FT_CORE_BINARY=/tmp/ft-windows-lotes-target/debug/ft-core ... :app:testDebugUnitTest :app:lintDebug :app:assembleDebug` en curso al entregar el commit, tras ajustes de revisión (parse sin reserialización, permisos de árbol y parada del plan). El coordinador registra el resultado final/cruzado al integrar.
+- Corrida con `FT_CORE_BINARY=/tmp/ft-windows-lotes-target/debug/ft-core`: **72/72 correctas, 0 omitidas**, incluido `CoreInteropTest` previo contra el core Linux nuevo. Las aserciones cruzadas de carpetas del coordinador se ejecutan en la integración.
+- Primera corrida completa JVM/lint/APK: `BUILD SUCCESSFUL in 5m 26s`. La corrida final con binario sigue en lint/assemble al registrar esta evidencia; el código de seguimiento siguiente volvió a compilar correctamente con su prueba focalizada.
 - `git diff --check`: correcto.
 - Cola base: corrida completa JVM/lint/APK correcta; evidencia final añadida a `cola-android.md`.
 
@@ -30,3 +31,9 @@ No se probó emulador, Windows nativo, J4+, Redmi ni rendimiento LAN/RAM. Las pr
 4. Recibir hacia bandeja privada y SAF con raíz existente/archivo del mismo nombre. Comprobar sufijo, archivos anteriores intactos, apertura de carpeta real por fila y que un proveedor que devuelve ID existente no se abre para escribir.
 5. Cortar durante segundo archivo, cancelar desde notificación, rotar/bloquear y forzar detención. Completados se conservan; cola detiene resto. Reintentar informa otra raíz y solo usa pendientes; no reanuda offsets ni reutiliza carpeta anterior.
 6. PC sin folder-support o respuesta no autorizada: ninguna carpeta se transforma en archivos sueltos. Archivos sueltos mantienen compatibilidad previa.
+
+## Seguimiento: evitar bloqueo durante ingestión
+
+El staging ya no mantiene el monitor del store mientras lee o sincroniza contenido. Solo el commit del manifiesto se serializa; vuelve a comprobar cancelación, límite de 64 archivos/64 directorios y mezcla con el estado vigente para preservar pausas/eliminaciones concurrentes. El cierre de un plan señala cancelación antes de desarmar. Así una fuente lenta no bloquea la pantalla al cerrar o pausar la cola.
+
+Validación adicional: `:app:testDebugUnitTest --tests local.filetransfer.OutgoingQueueStoreTest`, **15/15 correctas**, `BUILD SUCCESSFUL in 3m 38s`. Incluye una fuente bloqueada mientras se pausa/cancela y dos importaciones concurrentes compitiendo por la última plaza: la perdedora revierte solo sus snapshots, sin exceder capacidad ni perder el ganador. La compilación Kotlin de este seguimiento pasó.
