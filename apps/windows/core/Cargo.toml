@@ -1,0 +1,40 @@
+[package]
+name = "file-transfer-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+
+[dependencies]
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio"] }
+base64 = "=0.22.1"
+bytes = "=1.11.1"
+fs2 = "=0.4.3"
+futures-util = "=0.3.32"
+getrandom = "=0.4.3"
+hyper = { version = "=1.12.0", features = ["http1", "server"] }
+http-body-util = "=0.1.5"
+hyper-util = { version = "=0.1.21", features = ["tokio"] }
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+sha2 = "=0.10.9"
+subtle = "=2.6.1"
+tempfile = "=3.27.0"
+time = "=0.3.47"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "io-std", "sync", "time", "signal"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
+tokio-stream = "=0.1.18"
+tokio-util = { version = "=0.7.18", features = ["rt"] }
+uuid = { version = "=1.29.3", features = ["v4"] }
+
+[dev-dependencies]
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls-no-provider", "json", "stream"] }
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

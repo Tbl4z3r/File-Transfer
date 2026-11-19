@@ -1,0 +1,1629 @@
+import { encodeConnectionCode, type Descriptor } from "./pairing-code.js";
+import { encodePairingQr } from "./pairing-qr.js";
+type Peer = { id: string; name: string; supports_inbox: boolean; supports_folders?: boolean };
+type Transfer = {
+  transfer_id: string;
+  direction: "upload" | "download";
+  file_name: string;
+  size_bytes: string;
+  bytes_transferred: string;
+  state: string;
+  error_code?: string;
+  sha256?: string;
+  peer_id: string;
+  destination: string | null;
+  delivery_uncertain?: boolean;
+};
+type BatchFile = {
+  file_name: string;
+  relative_path?: string;
+  size_bytes: string;
+  transfer_id: string | null;
+  state: string;
+};
+type TransferBatch = {
+  batch_id: string;
+  peer_id: string;
+  state: string;
+  files: BatchFile[];
+  directories?: string[];
+};
+type Source = {
+  source: string;
+  file_name: string;
+  size_bytes: string;
+  modified: string;
+  relative_path?: string;
+};
+type SelectedDirectory = { source: string; relative_path: string };
+type FolderSelection = { sources: Source[]; directories: SelectedDirectory[] };
+type BatchStatus = { batch_id: string; state: string };
+type Snapshot = {
+  session: null | {
+    session_id: string;
+    host: string;
+    port: number;
+    cert_sha256: string;
+  };
+  receive_enabled: boolean;
+  peers: Peer[];
+  transfers: Transfer[];
+  upload_batch: TransferBatch | null;
+  download_batch: TransferBatch | null;
+};
+declare global {
+  interface Window {
+    __TAURI__?: {
+      webviewWindow?: {
+        getCurrentWebviewWindow(): { onDragDropEvent(callback: (event: { payload: NativeDrop }) => void): Promise<() => void> };
+      };
+      core: {
+        invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
+      };
+    };
+  }
+}
+const $ = <T extends HTMLElement>(id: string): T =>
+  document.getElementById(id) as T;
+const invoke = <T>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> => {
+  if (!window.__TAURI__) return Promise.reject("desktop_required");
+  return window.__TAURI__.core.invoke<T>(command, args);
+};
+const messages: Record<string, string> = {
+  network_unavailable:
+    "No se encontró una red activa. Conecta el PC a Wi-Fi o Ethernet y vuelve a iniciar. También puedes elegir otra conexión e introducir su IPv4.",
+  invalid_request:
+    "Comprueba que la IPv4 pertenezca a este PC y esté conectada a tu red.",
+  busy: "Termina o cancela la transferencia actual antes de iniciar otra.",
+  io_error:
+    "No se pudo acceder al archivo o abrir la conexión. Comprueba la carpeta, los permisos y que la IPv4 pertenezca a este PC.",
+  insufficient_space:
+    "No hay espacio suficiente en el destino. Elige otra carpeta o libera espacio.",
+  offer_uncertain: "No se pudo confirmar si se ofrecieron las carpetas. Comprueba el destino antes de volver a enviarlas.",
+  folders_unsupported: "Este móvil no admite carpetas. Actualiza su aplicación o elige otro dispositivo.",
+  limit_exceeded: "La selección supera el límite de 64 archivos, 64 carpetas o el tamaño permitido del manifiesto. Elige una selección más pequeña.",
+  source_changed:
+    "El archivo de origen ha cambiado. Vuelve a seleccionarlo y enviarlo.",
+  invalid_name:
+    "El nombre contiene caracteres que Windows no admite. Cambia su nombre antes de enviarlo.",
+  invalid_state: "La transferencia ya cambió de estado. Revisa su resultado.",
+  session_closed: "Inicia una sesión para conectar el móvil.",
+  revoked: "El dispositivo fue revocado. Vuelve a emparejarlo para conectar.",
+  timeout:
+    "La conexión no avanzó a tiempo. Comprueba la red y vuelve a enviar el archivo.",
+  network_error:
+    "La conexión se interrumpió. Vuelve a enviar el archivo desde el principio.",
+  size_mismatch: "El archivo llegó incompleto. Vuelve a enviarlo.",
+  integrity_mismatch:
+    "El archivo no superó la verificación. Vuelve a enviarlo.",
+  desktop_required:
+    "Abre esta pantalla desde la aplicación de escritorio File Transfer.",
+  storage_in_use:
+    "File Transfer ya está usando sus datos. Cierra la otra instancia.",
+};
+let selectedPeer = "";
+let selectedDestination: string | null = null;
+let latest: Snapshot | null = null;
+let peerSignature = "";
+let descriptorUntil = 0;
+let pairingGeneration = 0;
+let refreshPending: Promise<void> | null = null;
+let busy = false;
+type SendBatch = {
+  sessionId: string;
+  peerId: string;
+  sources: (Source & BatchFile)[];
+  state: string;
+  index: number;
+  transferId: string | null;
+  retry: boolean;
+  skipped: number;
+};
+type OutgoingAttempt = {
+  sessionId: string;
+  peerName: string;
+  peerId: string;
+  sources: Source[];
+  results: ("pending" | "completed" | "unfinished" | "uncertain")[];
+  directories?: SelectedDirectory[];
+  emptyFolderResult?: "pending" | "completed" | "unfinished" | "uncertain";
+  manifestId?: string;
+  queue?: SendBatch;
+  finished: boolean;
+};
+let outgoingAttempt: OutgoingAttempt | null = null;
+let retryTarget = "";
+let batch: SendBatch | null = null;
+let shownSendBatch: SendBatch | null = null;
+let shownUploadBatch: TransferBatch | null = null;
+let shownDownloadBatch: TransferBatch | null = null;
+const peerNames = new Map<string, string>();
+let listSessionId: string | null = null;
+let batchListKey = "";
+let batchRows: { row: HTMLElement; name: HTMLElement; detail: HTMLElement }[] =
+  [];
+let offering = false;
+let offerRevision = 0;
+function discardBatch(message?: string): void {
+  if (batch) {
+    batch.state = batch.sources.every((f) => f.state === "completed")
+      ? "completed"
+      : batch.sources.some((f) => f.state === "failed")
+        ? "failed"
+        : "cancelled";
+    for (const file of batch.sources)
+      if (file.state === "pending") file.state = "unsent";
+  }
+  batch = null;
+  if (message) notice(message);
+  updateControls();
+}
+async function cancelBatch(): Promise<void> {
+  const current = batch;
+  const id = current?.transferId;
+  if (current && id) current.sources[current.index].state = "cancelled";
+  discardBatch("Lote cancelado. Los archivos pendientes no se enviarán.");
+  // An in-flight offer is cancelled by sendNext when its IPC reply arrives.
+  if (id) {
+    try {
+      await invoke("cancel_transfer", { transferId: id });
+    } catch (error) {
+      notice(
+        messages[String(error)] ??
+          "No se pudo cancelar el archivo. Revisa su estado.",
+        true,
+      );
+    }
+  }
+  await refresh();
+}
+async function sendNext(current: SendBatch): Promise<void> {
+  if (shownUploadBatch && terminal(shownUploadBatch.state))
+    shownUploadBatch = null;
+  offering = true;
+  updateControls();
+  try {
+    const source = current.sources[current.index];
+    const transfer = await invoke<Transfer>("offer_download", {
+      peerId: current.peerId,
+      source: source.source,
+      sessionId: current.sessionId,
+      ...(current.retry ? { expected: sourceStamp(source) } : {}),
+    });
+    Object.assign(current.sources[current.index], {
+      file_name: transfer.file_name,
+      size_bytes: transfer.size_bytes,
+      transfer_id: transfer.transfer_id,
+      state: transfer.state,
+    });
+    if (batch !== current) {
+      // Cancellation/revocation/close may happen while IPC is creating this offer.
+      try {
+        const result = await invoke<Transfer>("cancel_transfer", {
+          transferId: transfer.transfer_id,
+        });
+        if (result) current.sources[current.index].state = result.state;
+      } catch {
+        /* Already terminal or session closed. */
+      }
+      return;
+    }
+    offerRevision++;
+    current.transferId = transfer.transfer_id;
+    notice(retrySkipMessage(current.skipped) + "Oferta enviada. Confirma cada archivo en el móvil.");
+  } catch (error) {
+    if (batch === current) {
+      current.sources[current.index].state = "failed";
+      discardBatch();
+      notice(
+        `${messages[String(error)] ?? "No se pudo ofrecer el archivo."} Los archivos pendientes no se enviarán.`,
+        true,
+      );
+    }
+  } finally {
+    offering = false;
+    updateControls();
+    void refresh().catch(() => {});
+  }
+}
+function advanceBatch(snapshot: Snapshot): void {
+  const current = batch;
+  if (!current) return;
+  if (
+    snapshot.session?.session_id !== current.sessionId ||
+    !snapshot.peers.some((peer) => peer.id === current.peerId)
+  ) {
+    discardBatch(
+      "El lote se ha detenido porque la sesión o el dispositivo ya no están disponibles.",
+    );
+    return;
+  }
+  if (current.transferId) {
+    const transfer = snapshot.transfers.find(
+      (t) => t.transfer_id === current.transferId,
+    );
+    if (transfer)
+      Object.assign(current.sources[current.index], {
+        file_name: transfer.file_name,
+        size_bytes: transfer.size_bytes,
+        state: transfer.state,
+      });
+    if (
+      !transfer ||
+      transfer.state === "failed" ||
+      transfer.state === "cancelled"
+    ) {
+      discardBatch(
+        "El lote se ha detenido. Los archivos pendientes no se enviarán.",
+      );
+      return;
+    }
+    if (transfer.state !== "completed") return;
+    current.index++;
+    current.transferId = null;
+    if (current.index === current.sources.length) {
+      discardBatch(
+        `Lote completado: ${current.sources.length} archivos enviados y verificados.`,
+      );
+      return;
+    }
+  }
+  // Respect every other v1 transfer, including an incoming request during a gap.
+  if (
+    !offering &&
+    !busy &&
+    !incomingReserved() &&
+    !outgoingReserved() &&
+    !snapshot.transfers.some((t) => !terminal(t.state))
+  )
+    void sendNext(current);
+}
+type QueueTarget = { sessionId: string; peerId: string; peerName: string };
+type QueuedSelection = {
+  id: string;
+  sources: Source[];
+  target: QueueTarget | null;
+  status: "pending" | "offering" | "review";
+  autoOffer?: boolean;
+  directories?: SelectedDirectory[];
+};
+const queueKey = "file-transfer.waiting-files.v1";
+let queueStorageFailed = false;
+function loadWaiting(): QueuedSelection[] {
+  try {
+    const stored: unknown = JSON.parse(window.localStorage?.getItem(queueKey) ?? "[]");
+    if (!Array.isArray(stored)) return [];
+    return stored.filter((entry): entry is QueuedSelection =>
+      entry && typeof entry.id === "string" && Array.isArray(entry.sources) &&
+      (entry.sources.length > 0 || entry.directories?.length > 0) &&
+      (!entry.directories || (Array.isArray(entry.directories) && entry.directories.every((dir: SelectedDirectory) =>
+        dir && typeof dir.source === "string" && typeof dir.relative_path === "string"))) && entry.sources.every((source: Source) =>
+        source && typeof source.source === "string" && typeof source.file_name === "string" &&
+        /^(0|[1-9][0-9]*)$/.test(source.size_bytes) && /^-?[0-9]+$/.test(source.modified),
+      ) && ["pending", "offering", "review"].includes(entry.status),
+    ).map((entry) => ({ ...entry, target: null, autoOffer: false, status: entry.status === "pending" ? "pending" : "review" }));
+  } catch {
+    queueStorageFailed = true;
+    return [];
+  }
+}
+let waiting = loadWaiting();
+let waitingSignature = "";
+function saveWaiting(): boolean {
+  try {
+    window.localStorage.setItem(queueKey, JSON.stringify(waiting));
+    queueStorageFailed = false;
+    return true;
+  } catch {
+    queueStorageFailed = true;
+    return false;
+  }
+}
+function enqueueSources(sources: Source[], target: QueueTarget | null = null, autoOffer = false, directories: SelectedDirectory[] = []): QueuedSelection {
+  const selection: QueuedSelection = { id: crypto.randomUUID(), sources: sources.map((source) => ({ ...source })), target, autoOffer, directories, status: "pending" };
+  waiting.push(selection);
+  saveWaiting();
+  renderWaiting();
+  notice(queueStorageFailed
+    ? "Archivos en espera durante esta ventana. No se pudo guardar la cola; mantenla abierta."
+    : "Archivos en espera. Elige el destino y pulsa Enviar cuando quieras ofrecerlos.");
+  return selection;
+}
+function removeWaiting(selection: QueuedSelection): void {
+  waiting = waiting.filter((entry) => entry !== selection);
+  saveWaiting();
+  renderWaiting();
+}
+function renderWaiting(): void {
+  const sessionId = latest?.session?.session_id ?? "";
+  const signature = JSON.stringify([waiting, latest?.peers, sessionId, busy, offering,
+    canOffer(sessionId, latest?.peers[0]?.id ?? "")]);
+  if (signature === waitingSignature) return;
+  waitingSignature = signature;
+  const list = $("waiting-files");
+  list.replaceChildren();
+  const directoryCount = waiting.reduce((total, entry) => total + (entry.directories?.length ?? 0), 0);
+  $("waiting-count").textContent = `${waiting.reduce((total, entry) => total + entry.sources.length, 0)} archivos${directoryCount ? ` y ${directoryCount} carpetas` : ""} en espera`;
+  if (!waiting.length) list.append(node("p", "hint", "Puedes elegir archivos o arrastrarlos desde el Explorador, incluso sin conexión."));
+  for (const entry of waiting) {
+    const directories = entry.directories ?? [];
+    const card = node("div", "waiting-selection");
+    card.dataset.waitingId = entry.id;
+    const files = node("ul", "batch-files");
+    for (const [index, source] of entry.sources.entries()) {
+      const row = node("li", "row batch-file");
+      const name = node("span", "grow", `${source.relative_path ?? source.file_name} · ${formatBytes(BigInt(source.size_bytes))}`);
+      name.title = source.source;
+      const remove = node("button", "text-button", "Quitar");
+      remove.type = "button";
+      remove.disabled = busy || entry.status === "offering";
+      remove.setAttribute("aria-label", `Quitar ${source.file_name} de la cola`);
+      remove.onclick = () => {
+        entry.sources.splice(index, 1);
+        if (!entry.sources.length && !directories.length) removeWaiting(entry);
+        else { saveWaiting(); renderWaiting(); }
+      };
+      row.append(name, remove);
+      files.append(row);
+    }
+    for (const directory of directories) files.append(node("li", "batch-file", `Carpeta: ${directory.relative_path}`));
+    card.append(files);
+    const targetValid = entry.target?.sessionId === sessionId &&
+      latest?.peers.some((peer) => peer.id === entry.target?.peerId);
+    card.append(node("p", "hint", targetValid
+      ? `Destino: ${entry.target!.peerName}${entry.autoOffer ? " · Se ofrecerá cuando termine la transferencia actual en esta sesión." : ""}`
+      : "Elige un dispositivo conectado para este envío."));
+    const choices = node("div", "waiting-targets");
+    for (const peer of latest?.session ? latest.peers : []) {
+      const choose = node("button", "", `${peer.name} · ${peer.id.slice(0, 8)}`);
+      choose.type = "button";
+      choose.disabled = busy || entry.status === "offering" || (directories.length > 0 && !peer.supports_folders);
+      choose.setAttribute("aria-pressed", String(targetValid && entry.target?.peerId === peer.id));
+      choose.onclick = () => {
+        entry.target = { sessionId, peerId: peer.id, peerName: peer.name };
+        entry.autoOffer = false;
+        saveWaiting();
+        renderWaiting();
+      };
+      choices.append(choose);
+    }
+    card.append(choices);
+    if (directories.length && latest?.peers.length && !latest.peers.some((peer) => peer.supports_folders))
+      card.append(node("p", "hint", "Los móviles conectados no admiten carpetas. Actualiza la aplicación del móvil para enviar esta selección."));
+    if (directories.length && targetValid && !latest?.peers.find((peer) => peer.id === entry.target?.peerId)?.supports_folders)
+      card.append(node("p", "hint", "Este móvil no admite carpetas. Actualiza su aplicación o elige otro dispositivo."));
+    if (entry.status === "review") {
+      card.append(node("p", "hint", "La aplicación se cerró mientras se ofrecía esta selección. Puede que el móvil ya la tenga. Comprueba su carpeta antes de volver a ofrecerla."));
+      const review = node("button", "", "He comprobado el destino; preparar otro envío");
+      review.type = "button";
+      review.disabled = busy;
+      review.onclick = () => { entry.status = "pending"; saveWaiting(); renderWaiting(); };
+      card.append(review);
+    }
+    const actions = node("div", "transfer-actions");
+    const send = node("button", "primary", "Enviar selección");
+    send.type = "button";
+    send.dataset.queueAction = "send";
+    send.disabled = busy || entry.status !== "pending" || !targetValid ||
+      (directories.length > 0 && !latest?.peers.find((peer) => peer.id === entry.target?.peerId)?.supports_folders) ||
+      !canOffer(sessionId, entry.target?.peerId ?? "");
+    send.onclick = () => { void sendWaiting(entry); };
+    const discard = node("button", "", "Eliminar selección");
+    discard.type = "button";
+    discard.dataset.queueAction = "remove";
+    discard.disabled = busy || entry.status === "offering";
+    discard.onclick = () => removeWaiting(entry);
+    actions.append(send, discard);
+    card.append(actions);
+    list.append(card);
+  }
+}
+const knownOfferRejections = new Set(["busy", "session_closed", "revoked", "source_changed", "io_error",
+  "invalid_request", "invalid_name", "limit_exceeded", "invalid_state", "not_found", "desktop_required", "folders_unsupported"]);
+function maybeOfferWaiting(): void {
+  let changed = false;
+  for (const entry of waiting) {
+    if (entry.autoOffer && (entry.target?.sessionId !== latest?.session?.session_id ||
+      !latest?.peers.some((peer) => peer.id === entry.target?.peerId))) {
+      entry.autoOffer = false;
+      changed = true;
+    }
+  }
+  if (changed) { saveWaiting(); renderWaiting(); }
+  const next = waiting.find((entry) => entry.autoOffer && entry.target &&
+    canOffer(entry.target.sessionId, entry.target.peerId));
+  if (next && !busy) void sendWaiting(next);
+}
+async function sendWaiting(entry: QueuedSelection): Promise<void> {
+  const target = entry.target;
+  if (!target || entry.status !== "pending" || busy || !canOffer(target.sessionId, target.peerId)) return;
+  entry.autoOffer = false;
+  await action(async () => {
+    const directories = entry.directories ?? [];
+    if (directories.length) await invoke("validate_folder_selection", { selection: { sources: entry.sources, directories } });
+    const available = directories.length ? entry.sources : await invoke<Source[]>("available_retry_sources", { sources: entry.sources });
+    if (available.length !== entry.sources.length) {
+      notice("Algún archivo cambió o ya no está disponible. La selección sigue en espera: quítalo o vuelve a elegir los archivos.", true);
+      return;
+    }
+    if (!canOffer(target.sessionId, target.peerId)) throw "busy";
+    // Persist the boundary before an IPC can authorize work. A reload at this point
+    // requires explicit review instead of silently creating a duplicate offer.
+    entry.status = "offering";
+    if (!saveWaiting()) {
+      entry.status = "pending";
+      notice("No se pudo guardar el estado de la cola antes de enviar. Vuelve a intentarlo.", true);
+      return;
+    }
+    try {
+      await offerSelection(available, target.peerId, target.sessionId, true, 0, directories);
+      removeWaiting(entry); // Ownership now belongs to the existing transfer/retry flow.
+    } catch (error) {
+      entry.status = knownOfferRejections.has(String(error)) ? "pending" : "review";
+      saveWaiting();
+      throw error;
+    }
+  });
+}
+async function chooseWaiting(): Promise<void> {
+  await action(async () => {
+    const sources = await invoke<Source[] | null>("choose_sources");
+    if (sources?.length) enqueueSources(sources);
+  });
+}
+type NativeDrop = { type: "enter" | "over" | "drop" | "leave"; paths?: string[]; position?: { x: number; y: number } };
+function dropPeer(event: NativeDrop): string {
+  if (!event.position || panels.some((id) => $<HTMLDialogElement>(id).open)) return "";
+  const ratio = window.devicePixelRatio || 1;
+  const target = document.elementFromPoint(event.position.x / ratio, event.position.y / ratio)
+    ?.closest<HTMLElement>("[data-drop-peer]");
+  const peerId = target?.dataset.dropPeer ?? "";
+  return latest?.session && latest.peers.some((peer) => peer.id === peerId) ? peerId : "";
+}
+function clearDropHighlight(): void {
+  for (const choice of document.querySelectorAll("[data-drop-peer]")) choice.classList.remove("drop-target");
+  $("waiting-panel").classList.remove("drop-target");
+}
+function nativeDrop(event: NativeDrop): void {
+  clearDropHighlight();
+  if (event.type === "leave") return;
+  const peerId = dropPeer(event);
+  if (event.type !== "drop") {
+    const highlighted = [...document.querySelectorAll<HTMLElement>("[data-drop-peer]")]
+      .find((choice) => choice.dataset.dropPeer === peerId);
+    (highlighted ?? $("waiting-panel")).classList.add("drop-target");
+    return;
+  }
+  const paths = event.paths ?? [];
+  if (!paths.length) return;
+  const target = peerId && latest?.session
+    ? { peerId, peerName: peerName(peerId), sessionId: latest.session.session_id } : null;
+  void invoke<FolderSelection>("inspect_selection", { paths }).then((selection) => {
+    if (!selection.sources.length && !selection.directories.length) return;
+    enqueueSources(selection.sources, target, Boolean(target), selection.directories);
+    maybeOfferWaiting();
+  }).catch((error) => notice(messages[String(error)] ?? "No se pudieron añadir los archivos. Comprueba que sigan disponibles.", true));
+}
+
+const samples = new Map<
+  string,
+  { bytes: bigint; time: number; speed: number }
+>();
+const speeds = new Map<string, number>();
+const panels = [
+  "activity-panel",
+  "devices-panel",
+  "settings-panel",
+  "pair-panel",
+  "retry-panel",
+];
+const rails: Record<string, string> = {
+  "activity-panel": "open-activity",
+  "devices-panel": "open-devices",
+  "settings-panel": "open-settings",
+};
+function icon(name: string): SVGSVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("icon");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", `#icon-${name}`);
+  svg.append(use);
+  return svg;
+}
+function node<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  className = "",
+  text = "",
+): HTMLElementTagNameMap[K] {
+  const element = document.createElement(tag);
+  element.className = className;
+  element.textContent = text;
+  return element;
+}
+function notice(message: string, error = false): void {
+  const element = $("notice");
+  element.textContent = message;
+  element.classList.remove("hidden");
+  element.classList.toggle("error", error);
+  for (const id of panels) {
+    const panel = $<HTMLDialogElement>(id);
+    const local = panel.querySelector<HTMLElement>(".dialog-notice");
+    if (panel.open && local) {
+      local.textContent = message;
+      local.classList.remove("hidden");
+      local.classList.toggle("failed", error);
+    }
+  }
+}
+function markRail(id?: string): void {
+  for (const rail of Object.values(rails)) {
+    if (rail === id) $(rail).setAttribute("aria-current", "page");
+    else $(rail).removeAttribute("aria-current");
+  }
+}
+function showPanel(id: string): void {
+  for (const other of panels) {
+    if (other !== id && $<HTMLDialogElement>(other).open) {
+      if (other === "pair-panel") hideDescriptor();
+      else $<HTMLDialogElement>(other).close();
+    }
+  }
+  const panel = $<HTMLDialogElement>(id);
+  if (!panel.open) {
+    panel.querySelector(".dialog-notice")?.classList.add("hidden");
+    panel.showModal();
+  }
+  markRail(rails[id]);
+}
+async function action(run: () => Promise<void>): Promise<void> {
+  if (busy) return;
+  busy = true;
+  updateControls();
+  try {
+    await run();
+    await refresh();
+  } catch (error) {
+    notice(
+      messages[String(error)] ??
+        "No se pudo completar la operación. Comprueba la conexión y vuelve a intentarlo.",
+      true,
+    );
+  } finally {
+    busy = false;
+    updateControls();
+    void refresh().catch(() => {});
+  }
+}
+function formatBytes(value: bigint): string {
+  const n = Number(value);
+  const units = ["B", "kB", "MB", "GB", "TB"];
+  let unit = 0;
+  while (unit < units.length - 1 && n >= 1000 ** (unit + 1)) unit++;
+  return `${(n / 1000 ** unit).toLocaleString("es", { maximumFractionDigits: 1 })} ${units[unit]}`;
+}
+function terminal(state: string): boolean {
+  return ["completed", "failed", "cancelled"].includes(state);
+}
+function hideDescriptor(): void {
+  pairingGeneration++;
+  descriptorUntil = 0;
+  $<HTMLImageElement>("pair-qr").removeAttribute("src");
+  $("pair-qr").classList.add("hidden");
+  $("qr-error").classList.add("hidden");
+  $<HTMLTextAreaElement>("descriptor").value = "";
+  const code = $<HTMLTextAreaElement>("connection-code");
+  code.value = "";
+  code.hidden = true;
+  $("fingerprint").textContent = "";
+  $<HTMLDetailsElement>("manual-pair").open = false;
+  const panel = $<HTMLDialogElement>("pair-panel");
+  if (panel.open) panel.close();
+}
+function peerName(id: string): string {
+  return (
+    latest?.peers.find((peer) => peer.id === id)?.name ??
+    peerNames.get(id) ?? "Dispositivo"
+  );
+}
+function stateLabel(t: Transfer): string {
+  const labels: Record<string, string> = {
+    awaiting_acceptance:
+      t.direction === "upload"
+        ? "Solicitud entrante"
+        : "Esperando aceptación en el móvil",
+    ready: "Preparado",
+    streaming: t.direction === "upload" ? "Recibiendo" : "Enviando",
+    awaiting_verification: "Verificando integridad",
+    completed:
+      t.direction === "upload"
+        ? "Recibido y verificado"
+        : "Enviado y verificado",
+    failed: "Interrumpido",
+    cancelled:
+      t.error_code === "revoked"
+        ? "Dispositivo revocado"
+        : t.error_code === "session_closed"
+          ? "Sesión cerrada"
+          : "Cancelado",
+  };
+  return labels[t.state] ?? "Estado no disponible";
+}
+function updateControls(): void {
+  const active = Boolean(latest?.session);
+  const hasPending = latest?.transfers.some((t) => !terminal(t.state)) ?? false;
+  $("home-content").setAttribute("aria-busy", String(busy));
+  $<HTMLButtonElement>("start-session").disabled = busy || active;
+  $<HTMLButtonElement>("stop-session").disabled = busy || !active;
+  $<HTMLInputElement>("bind-ip").disabled = active || busy;
+  $<HTMLButtonElement>("pair").disabled = !active || busy;
+  $<HTMLButtonElement>("receive").disabled = !active || busy;
+  $<HTMLButtonElement>("choose-folder").disabled = !active || busy;
+  $<HTMLButtonElement>("send-file").disabled =
+    (active && Boolean(selectedPeer) && hasPending) ||
+    incomingReserved() ||
+    outgoingReserved() ||
+    busy ||
+    Boolean(batch) ||
+    offering;
+  $<HTMLButtonElement>("queue-files").disabled = busy;
+  $<HTMLButtonElement>("send-folder").disabled = busy;
+  renderWaiting();
+  renderBatch();
+  renderRetry();
+  $("receive").setAttribute(
+    "aria-pressed",
+    String(latest?.receive_enabled ?? false),
+  );
+  $("receive-label").textContent = latest?.receive_enabled
+    ? "Dejar de recibir"
+    : "Recibir";
+  $("receive-setting").textContent = latest?.receive_enabled
+    ? "Disponible para recibir solicitudes. Autoriza cada archivo o lote."
+    : "La recepción está desactivada.";
+  $("action-hint").textContent = !active
+    ? "Inicia una sesión para conectar el móvil."
+    : !latest?.peers.length
+      ? "Muestra el QR para emparejar un móvil."
+      : outgoingReserved()
+        ? latest?.download_batch?.state === "awaiting_acceptance"
+          ? "Esperando aceptación en el móvil. Puedes cancelar el lote completo."
+          : "Enviando el lote autorizado. Puedes cancelar los archivos pendientes."
+        : batch
+          ? "Cada archivo necesita confirmación en el móvil. Puedes cancelar el lote completo."
+          : incomingReserved()
+            ? latest?.upload_batch?.state === "awaiting_acceptance"
+              ? "Revisa los archivos del lote y acéptalo o recházalo aquí."
+              : "Recibiendo el lote autorizado. Puedes cancelar los archivos pendientes."
+            : hasPending
+              ? "Termina o cancela la transferencia actual para enviar otra."
+              : latest.receive_enabled
+                ? "Disponible para recibir. Autoriza cada archivo o lote aquí."
+                : "Elige un dispositivo para enviar o activa Recibir.";
+  $("folder-label").textContent =
+    selectedDestination ?? "Se elige al aceptar cada archivo";
+  $("folder-hint").textContent = selectedDestination
+    ? "Para las siguientes aceptaciones de esta sesión."
+    : "Puedes elegir una carpeta para esta sesión.";
+  $("choose-folder").setAttribute(
+    "aria-label",
+    selectedDestination
+      ? `Cambiar carpeta de recepción: ${selectedDestination}`
+      : "Elegir carpeta de recepción",
+  );
+  $("choose-folder").setAttribute(
+    "title",
+    selectedDestination ?? "Elegir carpeta de recepción",
+  );
+  for (const button of document.querySelectorAll<HTMLButtonElement>(
+    "[data-transfer-action], [data-revoke]",
+  ))
+    button.disabled = busy;
+}
+function incomingReserved(): boolean {
+  return Boolean(latest?.upload_batch && !terminal(latest.upload_batch.state));
+}
+function outgoingReserved(): boolean {
+  return Boolean(latest?.download_batch && !terminal(latest.download_batch.state));
+}
+function batchFileLabel(
+  file: BatchFile,
+  incoming: boolean,
+  state: string,
+): string {
+  if (!file.transfer_id) {
+    if (file.state === "failed") return "No se pudo enviar";
+    if (terminal(state) || file.state === "unsent" || file.state === "not_sent")
+      return "Sin enviar";
+    return state === "awaiting_acceptance"
+      ? "Pendiente de aceptación"
+      : "Pendiente";
+  }
+  const labels: Record<string, string> = {
+    awaiting_acceptance: "Esperando aceptación en el móvil",
+    ready: "Preparado",
+    streaming: incoming ? "Recibiendo" : "Enviando",
+    awaiting_verification: "Verificando integridad",
+    completed: incoming ? "Recibido y verificado" : "Enviado y verificado",
+    failed: "Interrumpido",
+    cancelled: "Cancelado",
+  };
+  return labels[file.state] ?? "Pendiente";
+}
+function renderBatch(): void {
+  const incoming = shownUploadBatch;
+  const download = shownDownloadBatch;
+  const outgoing = shownSendBatch;
+  const files = incoming?.files ?? download?.files ?? outgoing?.sources ?? [];
+  const directories = incoming?.directories ?? download?.directories ?? [];
+  const hasManifest = Boolean(files.length || directories.length);
+  const state = incoming?.state ?? download?.state ?? outgoing?.state ?? "";
+  const key = incoming
+    ? `in/${incoming.batch_id}`
+    : download
+      ? `download/${download.batch_id}`
+      : outgoing
+        ? `out/${outgoing.sessionId}/${outgoing.sources[0]?.source}`
+        : "";
+  const waiting = Boolean(incoming && state === "awaiting_acceptance");
+  $("batch-panel").classList.toggle("hidden", !hasManifest);
+  const accept = $<HTMLButtonElement>("accept-batch");
+  const cancel = $<HTMLButtonElement>("cancel-batch");
+  accept.hidden = !waiting;
+  accept.disabled = busy || !waiting || !incomingReserved();
+  cancel.hidden = !hasManifest || terminal(state);
+  cancel.disabled = busy || terminal(state) || (!incoming && !download && !batch);
+  cancel.textContent = waiting ? "Rechazar lote" : "Cancelar lote";
+  const retryReceive = $<HTMLButtonElement>("retry-receive-batch");
+  retryReceive.hidden = !incoming ||
+    (state !== "failed" && (state !== "cancelled" ||
+      Boolean(latest?.peers.some((peer) => peer.id === incoming.peer_id))));
+  retryReceive.disabled = busy;
+  const completed = files.filter((f) => f.state === "completed").length;
+  const label =
+    state === "awaiting_acceptance"
+      ? incoming
+        ? "Solicitud entrante"
+        : "Esperando aceptación en el móvil"
+      : state === "completed"
+        ? "Lote completado"
+        : state === "failed"
+          ? "Lote interrumpido"
+          : state === "cancelled"
+            ? "Lote cancelado"
+            : "Lote en curso";
+  $("batch-status").textContent = incoming
+    ? `${label} · ${files.length} archivos · ${completed} verificados · ${peerName(incoming.peer_id)}`
+    : download
+      ? `${label} · ${files.length} archivos · ${completed} verificados · ${peerName(download.peer_id)}`
+      : outgoing
+        ? terminal(state)
+          ? `${label} · ${completed} de ${files.length} verificados · ${peerName(outgoing.peerId)}`
+          : `Archivo ${outgoing.index + 1} de ${files.length} · ${files.length - outgoing.index - 1} pendientes · ${peerName(outgoing.peerId)}`
+        : "";
+  if (directories.length) $("batch-status").textContent += ` · ${directories.length} carpetas`;
+  $("batch-directories").textContent = directories.map((path) => `Carpeta: ${path}`).join("\n");
+  const list = $("batch-files");
+  if (batchListKey !== key || batchRows.length !== files.length) {
+    batchListKey = key;
+    batchRows = files.map(() => {
+      const row = node("li", "batch-file");
+      const name = node("span", "batch-file-name");
+      const detail = node("span", "batch-file-detail");
+      row.append(name, detail);
+      return { row, name, detail };
+    });
+    list.replaceChildren(...batchRows.map((f) => f.row));
+    list.scrollTop = 0;
+  }
+  files.forEach((file, i) => {
+    batchRows[i].name.textContent = file.relative_path ?? file.file_name;
+    batchRows[i].detail.textContent =
+      `${formatBytes(BigInt(file.size_bytes))} · ${batchFileLabel(file, Boolean(incoming), state)}`;
+  });
+}
+async function prepareReceive(peerId: string): Promise<void> {
+  await action(async () => {
+    if (!latest?.session) throw "session_closed";
+    if (!latest.receive_enabled) await invoke("set_receive_enabled", { enabled: true });
+    if (!latest.peers.some((peer) => peer.id === peerId)) await showPairing();
+    notice("Pide al móvil que vuelva a enviar los archivos pendientes. La nueva solicitud necesita tu autorización.");
+  });
+}
+
+async function acceptIncomingBatch(): Promise<void> {
+  const pending = latest?.upload_batch;
+  const sessionId = latest?.session?.session_id;
+  if (!pending || pending.state !== "awaiting_acceptance" || !sessionId) return;
+  await action(async () => {
+    const destination =
+      selectedDestination ??
+      (await invoke<string | null>("choose_destination"));
+    if (
+      !destination ||
+      latest?.session?.session_id !== sessionId ||
+      latest.upload_batch?.batch_id !== pending.batch_id ||
+      latest.upload_batch.state !== "awaiting_acceptance"
+    )
+      return;
+    await invoke<BatchStatus>("accept_upload_batch", {
+      batchId: pending.batch_id,
+      destination,
+    });
+    offerRevision++;
+    selectedDestination = destination;
+  });
+}
+async function cancelIncomingBatch(): Promise<void> {
+  const pending = latest?.upload_batch;
+  if (!pending || terminal(pending.state)) return;
+  await action(async () => {
+    await invoke<BatchStatus>("cancel_upload_batch", {
+      batchId: pending.batch_id,
+    });
+    offerRevision++;
+  });
+}
+async function cancelOutgoingBatch(): Promise<void> {
+  const pending = latest?.download_batch;
+  if (!pending || terminal(pending.state)) return;
+  await action(async () => {
+    await invoke<BatchStatus>("cancel_download_batch", {
+      batchId: pending.batch_id,
+    });
+    offerRevision++;
+    notice("Lote cancelado. Los archivos pendientes no se enviarán.");
+  });
+}
+async function acceptTransfer(t: Transfer): Promise<void> {
+  await action(async () => {
+    const destination =
+      selectedDestination ??
+      (await invoke<string | null>("choose_destination"));
+    if (!destination) return;
+    await invoke("accept_upload", { transferId: t.transfer_id, destination });
+    selectedDestination = destination;
+  });
+}
+type TransferView = { node: HTMLElement; update: (t: Transfer) => void };
+const views = new Map<HTMLElement, Map<string, TransferView>>();
+function transferView(detailed: boolean): TransferView {
+  const card = node("article", "transfer-card");
+  const heading = node("div", "transfer-title");
+  const tile = node("span", "icon-tile");
+  tile.append(icon("file"));
+  const title = node("h3", "transfer-name");
+  const state = node("span", "state");
+  const headingText = node("div", "grow");
+  headingText.append(title, state);
+  heading.append(tile, headingText);
+  card.append(heading);
+  const progress = node("div", "progress");
+  const bar = node("div");
+  progress.append(bar);
+  progress.setAttribute("role", "progressbar");
+  progress.setAttribute("aria-label", "Avance de transferencia");
+  progress.setAttribute("aria-valuemin", "0");
+  progress.setAttribute("aria-valuemax", "100");
+  const detail = node("p", "transfer-detail");
+  const location = node("p", "transfer-detail");
+  const error = node("p", "transfer-detail failed");
+  const actions = node("div", "transfer-actions");
+  card.append(progress, detail, location, error, actions);
+  let actionSignature = "";
+  return {
+    node: card,
+    update: (t) => {
+      const done = BigInt(t.bytes_transferred);
+      const size = BigInt(t.size_bytes);
+      const percent =
+        size === 0n
+          ? t.state === "completed"
+            ? 100
+            : 0
+          : Math.min(100, Number((done * 10000n) / size) / 100);
+      title.textContent = t.file_name;
+      state.textContent = stateLabel(t);
+      state.classList.toggle("failed", t.state === "failed");
+      bar.style.width = `${percent}%`;
+      progress.setAttribute("aria-valuenow", String(percent));
+      progress.setAttribute(
+        "aria-valuetext",
+        `${formatBytes(done)} de ${formatBytes(size)}`,
+      );
+      progress.hidden = terminal(t.state) || t.state === "awaiting_acceptance";
+      const speed = speeds.get(t.transfer_id) ?? 0;
+      const eta =
+        speed > 0 ? Math.max(0, Math.ceil(Number(size - done) / speed)) : 0;
+      detail.textContent = `${peerName(t.peer_id)} · ${formatBytes(done)} de ${formatBytes(size)}${t.state === "streaming" && speed > 0 ? ` · ${formatBytes(BigInt(Math.round(speed)))}/s · ${eta > 60 ? `${Math.ceil(eta / 60)} min` : `${eta} s`} restantes` : ""}`;
+      location.hidden = !detailed || !t.destination;
+      location.textContent =
+        detailed && t.destination ? `Destino: ${t.destination}` : "";
+      error.hidden = t.state !== "failed";
+      error.textContent =
+        t.state === "failed"
+          ? (messages[t.error_code ?? ""] ??
+            "La transferencia se interrumpió. Vuelve a enviarla.")
+          : "";
+      const inBatch = [latest?.upload_batch, latest?.download_batch].some(
+        (manifest) => manifest?.files.some((f) => f.transfer_id === t.transfer_id),
+      );
+      const signature = `${t.transfer_id}/${t.state}/${Boolean(selectedDestination)}/${inBatch}`;
+      if (signature !== actionSignature) {
+        actionSignature = signature;
+        actions.replaceChildren();
+        if (
+          t.direction === "upload" &&
+          (t.state === "failed" || (t.state === "cancelled" && t.error_code === "revoked"))
+        ) {
+          const reconnect = node("button", "", "Reintentar recepción");
+          reconnect.type = "button";
+          reconnect.dataset.transferAction = "prepare-receive";
+          reconnect.onclick = () => { void prepareReceive(t.peer_id); };
+          actions.append(reconnect);
+        }
+        if (!terminal(t.state) && !inBatch) {
+          if (t.direction === "upload" && t.state === "awaiting_acceptance") {
+            const accept = node(
+              "button",
+              "primary",
+              selectedDestination ? "Aceptar" : "Aceptar y elegir carpeta",
+            );
+            accept.type = "button";
+            accept.dataset.transferAction = "accept";
+            accept.onclick = () => {
+              void acceptTransfer(t);
+            };
+            actions.append(accept);
+          }
+          const cancel = node(
+            "button",
+            "",
+            t.direction === "upload" && t.state === "awaiting_acceptance"
+              ? "Rechazar"
+              : "Cancelar",
+          );
+          cancel.type = "button";
+          cancel.dataset.transferAction = "cancel";
+          cancel.onclick = () => {
+            if (batch?.transferId === t.transfer_id) {
+              void cancelBatch();
+            } else {
+              void action(async () => {
+                await invoke("cancel_transfer", { transferId: t.transfer_id });
+              });
+            }
+          };
+          actions.append(cancel);
+        }
+      }
+      actions.hidden = actions.children.length === 0;
+    },
+  };
+}
+function renderTransfers(
+  container: HTMLElement,
+  transfers: Transfer[],
+  detailed = false,
+): void {
+  let cache = views.get(container);
+  if (!cache) {
+    cache = new Map();
+    views.set(container, cache);
+  }
+  const ids = new Set(transfers.map((t) => t.transfer_id));
+  for (const [id, view] of cache)
+    if (!ids.has(id)) {
+      view.node.remove();
+      cache.delete(id);
+    }
+  if (!transfers.length) {
+    if (!container.querySelector(".empty-state")) {
+      const empty = node("div", "panel empty-state");
+      empty.append(
+        node(
+          "p",
+          "",
+          container.id === "current-transfer"
+            ? "Sin transferencias en curso."
+            : "Todavía no hay actividad.",
+        ),
+      );
+      container.replaceChildren(empty);
+    }
+    return;
+  }
+  container.querySelector(".empty-state")?.remove();
+  transfers.forEach((t, index) => {
+    let view = cache.get(t.transfer_id);
+    if (!view) {
+      view = transferView(detailed);
+      cache.set(t.transfer_id, view);
+    }
+    view.update(t);
+    if (container.children[index] !== view.node)
+      container.insertBefore(view.node, container.children[index] ?? null);
+  });
+}
+function renderPeers(): void {
+  if (!latest) return;
+  const signature = JSON.stringify([latest.peers, selectedPeer]);
+  if (signature === peerSignature) return;
+  peerSignature = signature;
+  const choices = $("device-choices");
+  const peers = $("peers");
+  choices.replaceChildren();
+  peers.replaceChildren();
+  if (!latest.peers.length) {
+    choices.append(node("p", "", "Ningún dispositivo emparejado."));
+    peers.append(
+      node("p", "", "Todavía no has emparejado ningún dispositivo."),
+    );
+  }
+  for (const peer of latest.peers) {
+    const choice = node("button", "device-choice");
+    choice.type = "button";
+    choice.dataset.dropPeer = peer.id;
+    choice.title = "Suelta archivos aquí para ofrecerlos a este dispositivo";
+    choice.setAttribute("aria-pressed", String(peer.id === selectedPeer));
+    const tile = node("span", "icon-tile");
+    tile.append(icon("phone"));
+    const label = node("span", "grow");
+    label.append(
+      node("span", "peer-name", peer.name),
+      node("span", "peer-info", `Emparejado · ${peer.id.slice(0, 8)}`),
+    );
+    choice.append(tile, label);
+    if (peer.id === selectedPeer) choice.append(icon("check"));
+    choice.onclick = () => {
+      selectedPeer = peer.id;
+      renderPeers();
+      updateControls();
+    };
+    choices.append(choice);
+    const row = node("div", "peer-row");
+    const info = node("div", "grow");
+    info.append(
+      node("div", "peer-name", peer.name),
+      node("div", "peer-info", peer.id),
+    );
+    const revoke = node("button", "", "Revocar");
+    revoke.type = "button";
+    revoke.dataset.revoke = peer.id;
+    revoke.setAttribute("aria-label", `Revocar ${peer.name}`);
+    revoke.onclick = () => {
+      void action(async () => {
+        if (batch?.peerId === peer.id) discardBatch();
+        await invoke("revoke_peer", { peerId: peer.id });
+        notice(
+          `${peer.name} ya no puede conectarse. Sus transferencias activas se han cancelado.`,
+        );
+      });
+    };
+    row.append(info, revoke);
+    peers.append(row);
+  }
+}
+function updateSpeeds(transfers: Transfer[]): void {
+  const now = performance.now();
+  const ids = new Set(transfers.map((t) => t.transfer_id));
+  for (const id of samples.keys())
+    if (!ids.has(id)) {
+      samples.delete(id);
+      speeds.delete(id);
+    }
+  for (const t of transfers) {
+    const done = BigInt(t.bytes_transferred);
+    const previous = samples.get(t.transfer_id);
+    let speed = previous?.speed ?? 0;
+    if (previous && now > previous.time && done > previous.bytes)
+      speed = (Number(done - previous.bytes) * 1000) / (now - previous.time);
+    else if (previous && now - previous.time > 2000) speed = 0;
+    if (!previous || done !== previous.bytes)
+      samples.set(t.transfer_id, { bytes: done, time: now, speed });
+    speeds.set(t.transfer_id, speed);
+  }
+}
+function refresh(): Promise<void> {
+  if (refreshPending) return refreshPending;
+  refreshPending = refreshNow().finally(() => {
+    refreshPending = null;
+  });
+  return refreshPending;
+}
+async function refreshNow(): Promise<void> {
+  const revision = offerRevision;
+  const snapshot = await invoke<Snapshot>("snapshot");
+  if (revision !== offerRevision) return; // An offer completed after this snapshot was requested.
+  const sessionId = snapshot.session?.session_id ?? null;
+  // Only compare consecutive snapshots belonging to the same active session.
+  const disappeared =
+    sessionId && latest?.session?.session_id === sessionId
+      ? latest.peers.filter(
+          (peer) => !snapshot.peers.some((next) => next.id === peer.id),
+        )
+      : [];
+  if (sessionId !== listSessionId) {
+    retryTarget = "";
+    if (batch && batch.sessionId !== sessionId) discardBatch();
+    shownSendBatch = null;
+    shownUploadBatch = null;
+    shownDownloadBatch = null;
+    selectedDestination = null;
+    peerNames.clear();
+    samples.clear();
+    speeds.clear();
+    hideDescriptor();
+    listSessionId = sessionId;
+  }
+  latest = snapshot;
+  for (const peer of snapshot.peers) peerNames.set(peer.id, peer.name);
+  if (sessionId && snapshot.upload_batch) {
+    if (
+      !terminal(snapshot.upload_batch.state) ||
+      (!shownSendBatch && !shownDownloadBatch) ||
+      shownUploadBatch?.batch_id === snapshot.upload_batch.batch_id
+    ) {
+      shownUploadBatch = snapshot.upload_batch;
+      if (!terminal(snapshot.upload_batch.state)) shownDownloadBatch = null;
+    }
+  }
+  if (sessionId && snapshot.download_batch) {
+    if (
+      !terminal(snapshot.download_batch.state) ||
+      (!shownSendBatch && !shownUploadBatch) ||
+      shownDownloadBatch?.batch_id === snapshot.download_batch.batch_id
+    ) {
+      shownDownloadBatch = snapshot.download_batch;
+      if (!terminal(snapshot.download_batch.state)) shownUploadBatch = null;
+    }
+  }
+  const active = latest.session !== null;
+  $("session-badge").textContent = active
+    ? "Sesión activa"
+    : "Sesión cerrada";
+  $("session-badge").classList.toggle("active", active);
+  $("session-setup").classList.toggle("hidden", active);
+  $("session-address").textContent = latest.session
+    ? `${latest.session.host}:${latest.session.port}`
+    : "Sesión cerrada. Inicia una sesión desde la pantalla principal.";
+  if (!active) {
+    hideDescriptor();
+    selectedDestination = null;
+  }
+  if (!latest.peers.some((peer) => peer.id === selectedPeer))
+    selectedPeer = latest.peers[0]?.id ?? "";
+  renderPeers();
+  updateSpeeds(latest.transfers);
+  const ordered = [...latest.transfers].reverse();
+  const current = ordered.find((t) => !terminal(t.state)) ?? ordered[0];
+  renderTransfers($("current-transfer"), current ? [current] : []);
+  renderTransfers($("transfers"), ordered, true);
+  const recent = ordered.find((t) => terminal(t.state));
+  const recentContainer = $("recent-transfer");
+  if (recent) {
+    if (
+      recentContainer.dataset.transferId !== recent.transfer_id ||
+      recentContainer.dataset.state !== recent.state
+    ) {
+      const row = node("div", "row");
+      const tile = node("span", "icon-tile");
+      tile.append(icon(recent.state === "completed" ? "check" : "file"));
+      const text = node("div", "grow");
+      text.append(
+        node("p", "transfer-name", recent.file_name),
+        node("p", "transfer-detail", stateLabel(recent)),
+      );
+      row.append(tile, text);
+      recentContainer.replaceChildren(row);
+      recentContainer.dataset.transferId = recent.transfer_id;
+      recentContainer.dataset.state = recent.state;
+    }
+  } else {
+    recentContainer.replaceChildren(
+      node("p", "", "Todavía no hay transferencias finalizadas."),
+    );
+    delete recentContainer.dataset.transferId;
+  }
+  if (shownSendBatch)
+    for (const file of shownSendBatch.sources) {
+      const transfer = latest.transfers.find(
+        (t) => t.transfer_id === file.transfer_id,
+      );
+      if (transfer)
+        Object.assign(file, {
+          file_name: transfer.file_name,
+          size_bytes: transfer.size_bytes,
+          state: transfer.state,
+        });
+    }
+  advanceBatch(latest);
+  updateOutgoingAttempt(snapshot);
+  if (disappeared.length)
+    notice(
+      `${disappeared.map((peer) => peer.name).join(", ")} ${disappeared.length === 1 ? "se ha desconectado" : "se han desconectado"}. Para volver a conectar, muestra un nuevo QR y escanéalo en el móvil.`,
+    );
+  updateControls();
+  maybeOfferWaiting();
+}
+$("session-form").onsubmit = (event) => {
+  event.preventDefault();
+  void action(async () => {
+    await invoke("start_session", {
+      bindIpv4: $<HTMLInputElement>("bind-ip").value.trim(),
+    });
+    selectedDestination = null;
+    if (refreshPending) await refreshPending;
+    await refresh();
+    await showPairing();
+    notice("Sesión abierta. Escanea el QR con tu móvil.");
+  });
+};
+$("stop-session").onclick = () => {
+  void action(async () => {
+    hideDescriptor();
+    discardBatch();
+    await invoke("stop_session");
+    offerRevision++;
+    shownSendBatch = null;
+    shownUploadBatch = null;
+    shownDownloadBatch = null;
+    selectedPeer = "";
+    selectedDestination = null;
+    $<HTMLDialogElement>("settings-panel").close();
+    notice(
+      "Sesión cerrada. Los móviles necesitan un nuevo QR para volver a conectar. Las transferencias pendientes se han cancelado y se han eliminado sus parciales.",
+    );
+  });
+};
+$("receive").onclick = () => {
+  void action(async () => {
+    await invoke("set_receive_enabled", { enabled: !latest?.receive_enabled });
+  });
+};
+$("choose-folder").onclick = () => {
+  void action(async () => {
+    const destination = await invoke<string | null>("choose_destination");
+    if (destination) selectedDestination = destination;
+  });
+};
+function canOffer(sessionId: string, peerId: string): boolean {
+  return Boolean(
+    sessionId && latest?.session?.session_id === sessionId &&
+    latest.peers.some((peer) => peer.id === peerId) &&
+    !batch && !offering && !incomingReserved() && !outgoingReserved() &&
+    !latest.transfers.some((t) => !terminal(t.state)),
+  );
+}
+
+function sourceStamp({ size_bytes, modified }: Source): Pick<Source, "size_bytes" | "modified"> {
+  return { size_bytes, modified };
+}
+
+function retrySkipMessage(skipped: number): string {
+  if (skipped === 0) return "";
+  if (skipped === 1) return "Se omitió un archivo que cambió o ya no está disponible. ";
+  return `Se omitieron ${skipped} archivos que cambiaron o ya no están disponibles. `;
+}
+
+async function offerSelection(
+  sources: Source[], peerId: string, sessionId: string, retry = false, skipped = 0,
+  directories: SelectedDirectory[] = [],
+): Promise<void> {
+  if (!canOffer(sessionId, peerId)) throw "busy";
+  const attempt: OutgoingAttempt = {
+    sessionId,
+    peerName: peerName(peerId),
+    peerId,
+    sources,
+    results: sources.map(() => "pending"),
+    finished: false,
+    directories,
+    ...(directories.length && !sources.length ? { emptyFolderResult: "pending" as const } : {}),
+  };
+  if (directories.length) {
+    if (!latest?.peers.find((peer) => peer.id === peerId)?.supports_folders) throw "folders_unsupported";
+    const manifest = await invoke<BatchStatus>("offer_folder_selection", { peerId, sessionId, selection: { sources, directories } });
+    attempt.manifestId = manifest.batch_id;
+    offerRevision++;
+    shownSendBatch = null;
+    shownUploadBatch = null;
+    notice("Oferta de carpetas enviada. Esperando aceptación en el móvil.");
+  } else if (sources.length > 1 && latest?.peers.find((peer) => peer.id === peerId)?.supports_inbox) {
+    const manifest = await invoke<BatchStatus>("offer_download_batch", {
+      peerId,
+      sources: sources.map((source) => source.source),
+      sessionId,
+      ...(retry ? { expected: sources.map(sourceStamp) } : {}),
+    });
+    attempt.manifestId = manifest.batch_id;
+    offerRevision++;
+    shownSendBatch = null;
+    shownUploadBatch = null;
+    notice(retrySkipMessage(skipped) + "Oferta de lote enviada. Esperando aceptación en el móvil.");
+  } else {
+    shownDownloadBatch = null;
+    batch = {
+      peerId,
+      sessionId,
+      sources: sources.map((file) => ({
+        ...file,
+        transfer_id: null,
+        state: "pending",
+      })),
+      index: 0,
+      transferId: null,
+      state: "accepted",
+      retry,
+      skipped,
+    };
+    attempt.queue = batch;
+    shownSendBatch = batch;
+    shownUploadBatch = null;
+    notice(retrySkipMessage(skipped) + `Lote preparado: ${sources.length} archivos. Confirma cada archivo en el móvil.`);
+  }
+  outgoingAttempt = attempt;
+}
+
+function updateOutgoingAttempt(snapshot: Snapshot): void {
+  const attempt = outgoingAttempt;
+  if (!attempt || attempt.finished) return;
+  const sameSession = attempt.sessionId === snapshot.session?.session_id;
+  const manifest = snapshot.download_batch?.batch_id === attempt.manifestId
+    ? snapshot.download_batch : null;
+  if (sameSession && attempt.manifestId && !manifest) return;
+  if (sameSession && offering && attempt.queue) return;
+  const files = manifest?.files ?? attempt.queue?.sources;
+  const finished = !sameSession || terminal(manifest?.state ?? attempt.queue?.state ?? "");
+  attempt.results = attempt.results.map((previous, index) => {
+    const file = files?.[index];
+    if (previous === "completed" || file?.state === "completed") return "completed";
+    if (!finished) return previous;
+    if (!file) return "uncertain";
+    if (!file.transfer_id) return "unfinished";
+    const transfer = sameSession
+      ? snapshot.transfers.find((item) => item.transfer_id === file.transfer_id)
+      : undefined;
+    if (!transfer || transfer.delivery_uncertain) return "uncertain";
+    return transfer.state === "completed" ? "completed" : "unfinished";
+  });
+  if (attempt.emptyFolderResult) attempt.emptyFolderResult = manifest?.state === "completed" ? "completed"
+    : finished ? (!sameSession ? "uncertain" : "unfinished") : "pending";
+  attempt.finished = finished;
+}
+
+function renderRetry(): void {
+  const attempt = outgoingAttempt;
+  const results = attempt?.results ?? [];
+  const available = Boolean(attempt?.finished && (results.some((state) => state !== "completed") ||
+    (attempt.emptyFolderResult && attempt.emptyFolderResult !== "completed")));
+  $("retry-summary").classList.toggle("hidden", !available);
+  if (!available || !attempt) return;
+  const count = results.filter((state) => state !== "completed").length;
+  $("retry-label").textContent = attempt.emptyFolderResult
+    ? `${attempt.peerName} · Carpetas sin confirmación`
+    : `${attempt.peerName} · ${count} sin confirmación de ${results.length} archivos`;
+  const retry = $<HTMLButtonElement>("retry-send");
+  retry.disabled = busy || offering || Boolean(batch);
+  const choices = $("retry-devices");
+  if ($<HTMLDialogElement>("retry-panel").open) {
+    const peers = latest?.peers ?? [];
+    const signature = JSON.stringify([peers, retryTarget, busy]);
+    if (choices.dataset.signature !== signature) {
+      choices.dataset.signature = signature;
+      choices.replaceChildren(...peers.map((peer) => {
+        const button = node("button", "", `${peer.name} · ${peer.id.slice(0, 8)}`);
+        button.type = "button";
+        button.disabled = busy || Boolean(attempt.directories?.length && !peer.supports_folders);
+        button.setAttribute("aria-pressed", String(peer.id === retryTarget));
+        button.onclick = () => {
+          retryTarget = peer.id;
+          renderRetry();
+        };
+        return button;
+      }));
+    }
+    const uncertain = results.includes("uncertain") || attempt.emptyFolderResult === "uncertain";
+    $("retry-uncertain").classList.toggle("hidden", !uncertain);
+    $("retry-uncertain-files").textContent = attempt.sources
+      .filter((_, index) => results[index] === "uncertain")
+      .map((source) => source.relative_path ?? source.file_name)
+      .join(", ") || (attempt.emptyFolderResult === "uncertain"
+        ? attempt.directories?.map((directory) => directory.relative_path).join(", ") ?? "" : "");
+    const originalPaired = peers.some((peer) => peer.id === attempt.peerId);
+    $("retry-hint").textContent = originalPaired
+      ? "Elige el móvil de destino. El móvil deberá aceptar un nuevo envío."
+      : "Si tu móvil no aparece, vuelve a emparejarlo con un QR. Confirma el destino antes de ofrecer los archivos.";
+    $<HTMLButtonElement>("retry-pair").hidden = originalPaired;
+    if (attempt.directories?.length) $("retry-hint").textContent += " Las carpetas se crearán en una raíz nueva; no se volverán a enviar los archivos verificados.";
+    $<HTMLButtonElement>("retry-confirm").disabled = busy ||
+      Boolean(attempt.directories?.length && !peers.find((peer) => peer.id === retryTarget)?.supports_folders) ||
+      !canOffer(latest?.session?.session_id ?? "", retryTarget) ||
+      (!results.includes("unfinished") && attempt.emptyFolderResult !== "unfinished" && !$<HTMLInputElement>("retry-include").checked);
+  }
+}
+
+$("retry-send").onclick = () => {
+  if (!latest?.session) {
+    notice("Inicia una sesión y empareja el móvil para reintentar.");
+    return;
+  }
+  retryTarget = "";
+  $<HTMLInputElement>("retry-include").checked = false;
+  showPanel("retry-panel");
+  renderRetry();
+};
+$("retry-include").onchange = renderRetry;
+$("retry-pair").onclick = () => { void action(showPairing); };
+$("retry-confirm").onclick = () => {
+  const attempt = outgoingAttempt;
+  const sessionId = latest?.session?.session_id ?? "";
+  const peerId = retryTarget;
+  if (!attempt?.finished || !canOffer(sessionId, peerId)) return;
+  const includeUncertain = $<HTMLInputElement>("retry-include").checked;
+  if (attempt.emptyFolderResult === "uncertain" && !includeUncertain) return;
+  void action(async () => {
+    const requested = attempt.sources.filter((_, index) =>
+      attempt.results[index] === "unfinished" ||
+      (includeUncertain && attempt.results[index] === "uncertain"),
+    );
+    const sources = await invoke<Source[]>("available_retry_sources", { sources: requested });
+    if (!canOffer(sessionId, peerId)) throw "busy";
+    const skipped = requested.length - sources.length;
+    const directories = attempt.directories ?? [];
+    if (!sources.length && !attempt.emptyFolderResult) {
+      notice("Los archivos pendientes ya no están disponibles o cambiaron. Selecciónalos de nuevo si quieres enviarlos.", true);
+      return;
+    }
+    if (directories.length) await invoke("validate_folder_selection", { selection: { sources, directories } });
+    await offerSelection(sources, peerId, sessionId, true, skipped, directories);
+    $<HTMLDialogElement>("retry-panel").close();
+  });
+};
+
+$("send-folder").onclick = () => {
+  void action(async () => {
+    const selection = await invoke<FolderSelection | null>("choose_source_folder");
+    if (selection) enqueueSources(selection.sources, null, false, selection.directories);
+  });
+};
+$("queue-files").onclick = () => { void chooseWaiting(); };
+$("send-file").onclick = () => {
+  if (!latest?.session || !selectedPeer) { void chooseWaiting(); return; }
+  void action(async () => {
+    const peerId = selectedPeer;
+    const sessionId = latest?.session?.session_id ?? "";
+    if (!canOffer(sessionId, peerId)) return;
+    const sources = await invoke<Source[] | null>("choose_sources");
+    if (!sources?.length) return;
+    const target = { sessionId, peerId, peerName: peerName(peerId) };
+    if (!canOffer(sessionId, peerId)) { enqueueSources(sources, target); return; }
+    try {
+      await offerSelection(sources, peerId, sessionId);
+    } catch (error) {
+      const entry = enqueueSources(sources, target);
+      if (!knownOfferRejections.has(String(error))) { entry.status = "review"; saveWaiting(); }
+      throw error;
+    }
+  });
+};
+$("retry-receive-batch").onclick = () => {
+  if (shownUploadBatch) void prepareReceive(shownUploadBatch.peer_id);
+};
+$("accept-batch").onclick = () => {
+  void acceptIncomingBatch();
+};
+$("cancel-batch").onclick = () => {
+  if (shownUploadBatch && !terminal(shownUploadBatch.state))
+    void cancelIncomingBatch();
+  else if (shownDownloadBatch && !terminal(shownDownloadBatch.state))
+    void cancelOutgoingBatch();
+  else void cancelBatch();
+};
+async function showPairing() {
+  hideDescriptor(); // Never leave credentials from an earlier window after an IPC or encoder failure.
+  const generation = pairingGeneration;
+  const until = performance.now() + 120000; // Include IPC time conservatively in the server window.
+  const descriptor = await invoke<Descriptor>("open_pairing_window");
+  if (generation !== pairingGeneration || performance.now() >= until) return;
+  const payload = JSON.stringify(descriptor);
+  const code = encodeConnectionCode(descriptor);
+  descriptorUntil = until;
+  $<HTMLTextAreaElement>("descriptor").value = payload;
+  $<HTMLTextAreaElement>("connection-code").value = code;
+  $("fingerprint").textContent =
+    `Huella: ${descriptor.cert_sha256.match(/.{1,8}/g)?.join(" ")}`;
+  try {
+    const qr = encodePairingQr(payload);
+    $<HTMLImageElement>("pair-qr").src = qr.dataUrl;
+    $("pair-qr").classList.remove("hidden");
+  } catch {
+    $("qr-error").classList.remove("hidden");
+    $<HTMLDetailsElement>("manual-pair").open = true;
+  }
+  $("pair-seconds").textContent = String(
+    Math.max(0, Math.ceil((until - performance.now()) / 1000)),
+  );
+  showPanel("pair-panel");
+}
+$("pair").onclick = () => {
+  void action(showPairing);
+};
+$("hide-pair").onclick = hideDescriptor;
+$<HTMLDialogElement>("pair-panel").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  hideDescriptor();
+});
+function copyPairingValue(id: string): void {
+  void action(async () => {
+    if (!descriptorUntil || performance.now() >= descriptorUntil) {
+      hideDescriptor();
+      return;
+    }
+    const generation = pairingGeneration;
+    const field = $<HTMLTextAreaElement>(id);
+    try {
+      await navigator.clipboard.writeText(field.value);
+      if (generation === pairingGeneration)
+        notice("Datos copiados. Pégalos solo en tu Android.");
+    } catch {
+      if (generation !== pairingGeneration) return;
+      if (performance.now() >= descriptorUntil) {
+        hideDescriptor();
+        return;
+      }
+      field.hidden = false;
+      field.focus();
+      field.select();
+      notice("Pulsa Ctrl+C para copiar los datos seleccionados.");
+    }
+  });
+}
+$("copy-code").onclick = () => copyPairingValue("connection-code");
+$("copy-pair").onclick = () => copyPairingValue("descriptor");
+$("open-activity").onclick = $("all-activity").onclick = () =>
+  showPanel("activity-panel");
+$("open-devices").onclick = () => showPanel("devices-panel");
+$("open-settings").onclick = () => showPanel("settings-panel");
+for (const button of document.querySelectorAll<HTMLButtonElement>(
+  "[data-close]",
+))
+  button.onclick = () => {
+    $<HTMLDialogElement>(button.dataset.close!).close();
+  };
+for (const id of panels)
+  $<HTMLDialogElement>(id).addEventListener("close", () => {
+    if (
+      id === "pair-panel" &&
+      descriptorUntil &&
+      !$<HTMLDialogElement>(id).open
+    )
+      hideDescriptor();
+    if (!panels.some((panel) => $<HTMLDialogElement>(panel).open)) markRail();
+  });
+let stopDropListener: (() => void) | undefined;
+const nativeWindow = window.__TAURI__?.webviewWindow?.getCurrentWebviewWindow();
+if (nativeWindow) void nativeWindow.onDragDropEvent(({ payload }) => nativeDrop(payload))
+  .then((unlisten) => { stopDropListener = unlisten; })
+  .catch(() => notice("No se pudo activar arrastrar y soltar. Usa Elegir archivos o Dejar en espera.", true));
+window.addEventListener("pagehide", () => { hideDescriptor(); stopDropListener?.(); });
+setInterval(() => {
+  if (descriptorUntil) {
+    const left = Math.ceil((descriptorUntil - performance.now()) / 1000);
+    if (left <= 0) hideDescriptor();
+    else $("pair-seconds").textContent = String(left);
+  }
+  void refresh().catch((error) => {
+    notice(
+      messages[String(error)] ??
+        "No se pudo actualizar el estado de la aplicación.",
+      true,
+    );
+  });
+}, 500);
+void refresh().catch((error) => {
+  notice(messages[String(error)] ?? "No se pudo iniciar la aplicación.", true);
+});

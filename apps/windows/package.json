@@ -1,0 +1,22 @@
+{
+  "name": "file-transfer-windows",
+  "version": "0.1.9",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.9.0",
+  "scripts": {
+    "build": "tsc --project tsconfig.json && node build.mjs",
+    "dev": "npm run build && tauri dev",
+    "tauri": "tauri",
+    "test:qr": "npm run build && node --test scripts/pairing-qr.test.mjs",
+    "test:ui": "npm run build && node --test scripts/pairing-qr.test.mjs scripts/desktop-ui.test.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.5",
+    "qrcode-generator": "2.0.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.5",
+    "typescript": "6.0.3"
+  }
+}
