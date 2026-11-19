@@ -47,7 +47,7 @@ test("session form starts a real session command and closing clears the session 
   h.element("stop-session").click();
   await h.settle();
   assert.equal(commands(h, "stop_session").length, 1);
-  assert.equal(h.element("send-file").disabled, true);
+  assert.equal(h.element("send-file").disabled, false);
   assert.equal(
     h.element("folder-label").textContent,
     "Se elige al aceptar cada archivo",
@@ -1016,4 +1016,210 @@ test("an interrupted inbound manifest can prepare reception before any file was 
   assert.equal(h.snapshot.receive_enabled, true);
   assert.equal(commands(h, "open_pairing_window").length, 1);
   assert.equal(commands(h, "accept_upload_batch").length, 0);
+});
+
+const queueSources = ["sin-extension", "foto.webp"].map((file_name) => ({
+  source: `C:\\Users\\Personal\\${file_name}`, file_name, size_bytes: "5000000001", modified: "1234567890",
+}));
+const queueRows = (h) => h.element("waiting-files").children;
+const queueTargets = (h) => queueRows(h)[0].querySelector(".waiting-targets").querySelectorAll("button");
+const queueSend = (h) => queueRows(h)[0].querySelector('[data-queue-action="send"]');
+function queueHandler(h, extra = () => {}) {
+  h.onInvoke(async (command, args) => {
+    if (command === "choose_sources" || command === "inspect_sources") return queueSources;
+    if (command === "available_retry_sources") return args.sources;
+    if (command === "offer_download_batch") {
+      const manifest = { batch_id: "queue-batch", state: "awaiting_acceptance", peer_id: args.peerId,
+        files: args.sources.map((source) => ({ file_name: source.split("\\").pop(), size_bytes: "5000000001", state: "pending", transfer_id: null })) };
+      h.snapshot.download_batch = manifest;
+      return manifest;
+    }
+    if (command === "offer_download") {
+      const offered = transfer({ direction: "download", peer_id: args.peerId, file_name: args.source });
+      h.snapshot.transfers = [offered];
+      return offered;
+    }
+    return extra(command, args);
+  });
+}
+
+test("files can wait offline, survive reload and require an explicit target among several phones", async () => {
+  const h = await ui(undefined, { session: null });
+  queueHandler(h);
+  assert.equal(h.element("send-file").disabled, false);
+  assert.equal(h.element("queue-files").disabled, false);
+  h.element("send-file").click();
+  await h.settle();
+  assert.match(h.element("waiting-count").textContent, /2 archivos/);
+  assert.equal(commands(h, "offer_download").length, 0);
+  const restored = await ui(undefined, { peers }, { storage: h.storage });
+  queueHandler(restored);
+  assert.match(restored.element("waiting-files").textContent, /sin-extension/);
+  assert.equal(queueSend(restored).disabled, true);
+  queueTargets(restored)[1].click();
+  queueSend(restored).click();
+  await restored.settle();
+  const offer = commands(restored, "offer_download")[0];
+  assert.equal(offer.args.peerId, "phone-b");
+  assert.equal(offer.args.expected.modified, queueSources[0].modified);
+  assert.equal(queueRows(restored).length, 1); // Empty-state paragraph; selection transferred to retry ownership.
+  assert.match(restored.element("waiting-count").textContent, /0 archivos/);
+  await restored.tick();
+  assert.equal(commands(restored, "offer_download").length, 1);
+});
+
+test("Dejar en espera is available while another transfer owns the slot and permits removing individual files", async () => {
+  const h = await ui(undefined, { peers, transfers: [transfer({ state: "streaming" })] });
+  queueHandler(h);
+  assert.equal(h.element("queue-files").disabled, false);
+  h.element("queue-files").click();
+  await h.settle();
+  queueTargets(h)[0].click();
+  assert.equal(queueSend(h).disabled, true);
+  queueRows(h)[0].querySelector(".text-button").click();
+  assert.match(h.element("waiting-count").textContent, /1 archivos/);
+  assert.doesNotMatch(h.element("waiting-files").textContent, /sin-extension/);
+  queueRows(h)[0].querySelector('[data-queue-action="remove"]').click();
+  assert.match(h.element("waiting-count").textContent, /0 archivos/);
+  assert.equal(commands(h, "offer_download").length, 0);
+});
+
+test("general native drop uses real paths, converts physical coordinates and never guesses a target", async () => {
+  const points = [];
+  const h = await ui(undefined, { peers }, { ratio: 2, onPoint: (x, y) => points.push([x, y]) });
+  queueHandler(h);
+  const paths = queueSources.map((source) => source.source);
+  await h.drop({ type: "enter", paths, position: { x: 240, y: 100 } });
+  assert.equal(h.element("waiting-panel").classList.contains("drop-target"), true);
+  await h.drop({ type: "drop", paths, position: { x: 240, y: 100 } });
+  assert.deepEqual(points, [[120, 50], [120, 50]]);
+  assert.deepEqual(Array.from(commands(h, "inspect_sources")[0].args.paths), paths);
+  assert.equal(queueSend(h).disabled, true);
+  assert.equal(commands(h, "offer_download_batch").length, 0);
+  h.pagehide();
+  assert.equal(h.dropUnlistened(), true);
+});
+
+test("native drop over an authenticated free phone offers only to that phone through receiver consent", async () => {
+  const h = await ui(undefined, { peers: peers.map((peer) => ({ ...peer, supports_inbox: true })) });
+  queueHandler(h);
+  const phone = h.element("device-choices").querySelectorAll("button")[1];
+  await h.drop({ type: "drop", paths: queueSources.map((source) => source.source), position: { x: 10, y: 10 } }, phone);
+  const offer = commands(h, "offer_download_batch")[0];
+  assert.equal(offer.args.peerId, "phone-b");
+  assert.equal(offer.args.sessionId, "session-a");
+  assert.equal(offer.args.expected[0].modified, queueSources[0].modified);
+  assert.equal(commands(h, "accept_upload").length, 0);
+  assert.equal(commands(h, "offer_download").length, 0);
+  assert.match(h.element("waiting-count").textContent, /0 archivos/);
+  await h.tick();
+  assert.equal(commands(h, "offer_download_batch").length, 1);
+});
+
+test("native drop over a busy phone queues for that exact destination and offers once after it becomes free", async () => {
+  const h = await ui(undefined, { peers, transfers: [transfer({ state: "streaming" })] });
+  queueHandler(h);
+  await h.drop({ type: "drop", paths: [queueSources[0].source], position: { x: 10, y: 10 } },
+    h.element("device-choices").querySelectorAll("button")[1]);
+  assert.match(h.element("waiting-files").textContent, /Destino: Redmi/);
+  h.snapshot.transfers = [];
+  await h.tick();
+  assert.equal(commands(h, "offer_download").length, 1);
+  assert.equal(commands(h, "offer_download")[0].args.peerId, "phone-b");
+  await h.tick();
+  assert.equal(commands(h, "offer_download").length, 1);
+});
+
+test("changed or missing queued sources keep the selection and target without creating any offer", async () => {
+  const h = await ui(undefined, { peers });
+  h.onInvoke(async (command) => {
+    if (command === "choose_sources") return queueSources;
+    if (command === "available_retry_sources") return queueSources.slice(1);
+  });
+  h.element("queue-files").click();
+  await h.settle();
+  queueTargets(h)[1].click();
+  queueSend(h).click();
+  await h.settle();
+  assert.match(h.element("waiting-count").textContent, /2 archivos/);
+  assert.match(h.element("waiting-files").textContent, /Destino: Redmi/);
+  assert.match(h.element("notice").textContent, /cambió o ya no está disponible/);
+  assert.equal(commands(h, "offer_download").length, 0);
+});
+
+test("a rejected manifest retains queued paths and target; polling never retries automatically", async () => {
+  const h = await ui(undefined, { peers: peers.map((peer) => ({ ...peer, supports_inbox: true })) });
+  h.onInvoke(async (command, args) => {
+    if (command === "choose_sources") return queueSources;
+    if (command === "available_retry_sources") return args.sources;
+    if (command === "offer_download_batch") throw "busy";
+  });
+  h.element("queue-files").click(); await h.settle();
+  queueTargets(h)[1].click(); queueSend(h).click(); await h.settle();
+  assert.match(h.element("waiting-count").textContent, /2 archivos/);
+  assert.match(h.element("waiting-files").textContent, /Destino: Redmi/);
+  await h.tick();
+  assert.equal(commands(h, "offer_download_batch").length, 1);
+  assert.equal(queueSend(h).disabled, false);
+});
+
+test("a restart during an in-flight offer requires checking the remote folder before a new explicit offer", async () => {
+  const h = await ui(undefined, { peers: [{ ...peers[0], supports_inbox: true }] });
+  let resolveOffer;
+  h.onInvoke(async (command, args) => {
+    if (command === "choose_sources") return queueSources;
+    if (command === "available_retry_sources") return args.sources;
+    if (command === "offer_download_batch") return new Promise((resolve) => { resolveOffer = resolve; });
+  });
+  h.element("queue-files").click(); await h.settle();
+  queueTargets(h)[0].click(); queueSend(h).click(); await h.settle();
+  const restored = await ui(undefined, { peers }, { storage: new Map(h.storage) });
+  assert.match(restored.element("waiting-files").textContent, /Puede que el móvil ya la tenga/);
+  queueTargets(restored)[1].click();
+  assert.equal(queueSend(restored).disabled, true);
+  assert.equal(commands(restored, "offer_download").length, 0);
+  const review = queueRows(restored)[0].querySelectorAll("button").find((button) => /He comprobado/.test(button.textContent));
+  review.click();
+  assert.equal(queueSend(restored).disabled, false);
+  resolveOffer({ batch_id: "authorised", state: "awaiting_acceptance" });
+  await h.settle();
+});
+
+test("queued destinations are invalidated when the session closes and are not assigned to the next phone", async () => {
+  const h = await ui(undefined, { peers });
+  queueHandler(h);
+  h.element("queue-files").click(); await h.settle();
+  queueTargets(h)[1].click();
+  h.element("stop-session").click(); await h.settle();
+  assert.match(h.element("waiting-count").textContent, /2 archivos/);
+  h.snapshot.session = { session_id: "another-session", host: "192.168.1.2", port: 12345 };
+  h.snapshot.peers = [peers[0]];
+  await h.tick();
+  assert.equal(queueSend(h).disabled, true);
+  assert.equal(queueTargets(h)[0].getAttribute("aria-pressed"), "false");
+});
+
+test("an ambiguous queued offer failure requires checking the destination and never retries itself", async () => {
+  const h = await ui(undefined, { peers: [{ ...peers[0], supports_inbox: true }] });
+  h.onInvoke(async (command, args) => {
+    if (command === "choose_sources") return queueSources;
+    if (command === "available_retry_sources") return args.sources;
+    if (command === "offer_download_batch") throw "IPC connection interrupted";
+  });
+  h.element("queue-files").click(); await h.settle();
+  queueTargets(h)[0].click(); queueSend(h).click(); await h.settle();
+  assert.equal(queueSend(h).disabled, true);
+  assert.match(h.element("waiting-files").textContent, /Puede que el móvil ya la tenga/);
+  await h.tick();
+  assert.equal(commands(h, "offer_download_batch").length, 1);
+});
+
+test("a storage failure before authorization keeps queued choices and does not offer", async () => {
+  const h = await ui(undefined, { peers }, { storageFail: true });
+  queueHandler(h);
+  h.element("queue-files").click(); await h.settle();
+  queueTargets(h)[0].click(); queueSend(h).click(); await h.settle();
+  assert.match(h.element("waiting-count").textContent, /2 archivos/);
+  assert.match(h.element("notice").textContent, /guardar el estado/);
+  assert.equal(commands(h, "offer_download").length, 0);
 });

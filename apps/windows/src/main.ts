@@ -49,6 +49,9 @@ type Snapshot = {
 declare global {
   interface Window {
     __TAURI__?: {
+      webviewWindow?: {
+        getCurrentWebviewWindow(): { onDragDropEvent(callback: (event: { payload: NativeDrop }) => void): Promise<() => void> };
+      };
       core: {
         invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
       };
@@ -74,6 +77,7 @@ const messages: Record<string, string> = {
     "No se pudo acceder al archivo o abrir la conexión. Comprueba la carpeta, los permisos y que la IPv4 pertenezca a este PC.",
   insufficient_space:
     "No hay espacio suficiente en el destino. Elige otra carpeta o libera espacio.",
+  files_only: "Por ahora puedes añadir archivos. Elige los archivos dentro de la carpeta.",
   source_changed:
     "El archivo de origen ha cambiado. Vuelve a seleccionarlo y enviarlo.",
   invalid_name:
@@ -268,6 +272,220 @@ function advanceBatch(snapshot: Snapshot): void {
   )
     void sendNext(current);
 }
+type QueueTarget = { sessionId: string; peerId: string; peerName: string };
+type QueuedSelection = {
+  id: string;
+  sources: Source[];
+  target: QueueTarget | null;
+  status: "pending" | "offering" | "review";
+  autoOffer?: boolean;
+};
+const queueKey = "file-transfer.waiting-files.v1";
+let queueStorageFailed = false;
+function loadWaiting(): QueuedSelection[] {
+  try {
+    const stored: unknown = JSON.parse(window.localStorage?.getItem(queueKey) ?? "[]");
+    if (!Array.isArray(stored)) return [];
+    return stored.filter((entry): entry is QueuedSelection =>
+      entry && typeof entry.id === "string" && Array.isArray(entry.sources) &&
+      entry.sources.length > 0 && entry.sources.every((source: Source) =>
+        source && typeof source.source === "string" && typeof source.file_name === "string" &&
+        /^(0|[1-9][0-9]*)$/.test(source.size_bytes) && /^-?[0-9]+$/.test(source.modified),
+      ) && ["pending", "offering", "review"].includes(entry.status),
+    ).map((entry) => ({ ...entry, target: null, autoOffer: false, status: entry.status === "pending" ? "pending" : "review" }));
+  } catch {
+    queueStorageFailed = true;
+    return [];
+  }
+}
+let waiting = loadWaiting();
+let waitingSignature = "";
+function saveWaiting(): boolean {
+  try {
+    window.localStorage.setItem(queueKey, JSON.stringify(waiting));
+    queueStorageFailed = false;
+    return true;
+  } catch {
+    queueStorageFailed = true;
+    return false;
+  }
+}
+function enqueueSources(sources: Source[], target: QueueTarget | null = null, autoOffer = false): QueuedSelection {
+  const selection: QueuedSelection = { id: crypto.randomUUID(), sources: sources.map((source) => ({ ...source })), target, autoOffer, status: "pending" };
+  waiting.push(selection);
+  saveWaiting();
+  renderWaiting();
+  notice(queueStorageFailed
+    ? "Archivos en espera durante esta ventana. No se pudo guardar la cola; mantenla abierta."
+    : "Archivos en espera. Elige el destino y pulsa Enviar cuando quieras ofrecerlos.");
+  return selection;
+}
+function removeWaiting(selection: QueuedSelection): void {
+  waiting = waiting.filter((entry) => entry !== selection);
+  saveWaiting();
+  renderWaiting();
+}
+function renderWaiting(): void {
+  const sessionId = latest?.session?.session_id ?? "";
+  const signature = JSON.stringify([waiting, latest?.peers, sessionId, busy, offering,
+    canOffer(sessionId, latest?.peers[0]?.id ?? "")]);
+  if (signature === waitingSignature) return;
+  waitingSignature = signature;
+  const list = $("waiting-files");
+  list.replaceChildren();
+  $("waiting-count").textContent = `${waiting.reduce((total, entry) => total + entry.sources.length, 0)} archivos en espera`;
+  if (!waiting.length) list.append(node("p", "hint", "Puedes elegir archivos o arrastrarlos desde el Explorador, incluso sin conexión."));
+  for (const entry of waiting) {
+    const card = node("div", "waiting-selection");
+    card.dataset.waitingId = entry.id;
+    const files = node("ul", "batch-files");
+    for (const [index, source] of entry.sources.entries()) {
+      const row = node("li", "row batch-file");
+      const name = node("span", "grow", `${source.file_name} · ${formatBytes(BigInt(source.size_bytes))}`);
+      name.title = source.source;
+      const remove = node("button", "text-button", "Quitar");
+      remove.type = "button";
+      remove.disabled = busy || entry.status === "offering";
+      remove.setAttribute("aria-label", `Quitar ${source.file_name} de la cola`);
+      remove.onclick = () => {
+        entry.sources.splice(index, 1);
+        if (!entry.sources.length) removeWaiting(entry);
+        else { saveWaiting(); renderWaiting(); }
+      };
+      row.append(name, remove);
+      files.append(row);
+    }
+    card.append(files);
+    const targetValid = entry.target?.sessionId === sessionId &&
+      latest?.peers.some((peer) => peer.id === entry.target?.peerId);
+    card.append(node("p", "hint", targetValid
+      ? `Destino: ${entry.target!.peerName}${entry.autoOffer ? " · Se ofrecerá cuando termine la transferencia actual en esta sesión." : ""}`
+      : "Elige un dispositivo conectado para este envío."));
+    const choices = node("div", "waiting-targets");
+    for (const peer of latest?.session ? latest.peers : []) {
+      const choose = node("button", "", `${peer.name} · ${peer.id.slice(0, 8)}`);
+      choose.type = "button";
+      choose.disabled = busy || entry.status === "offering";
+      choose.setAttribute("aria-pressed", String(targetValid && entry.target?.peerId === peer.id));
+      choose.onclick = () => {
+        entry.target = { sessionId, peerId: peer.id, peerName: peer.name };
+        entry.autoOffer = false;
+        saveWaiting();
+        renderWaiting();
+      };
+      choices.append(choose);
+    }
+    card.append(choices);
+    if (entry.status === "review") {
+      card.append(node("p", "hint", "La aplicación se cerró mientras se ofrecía esta selección. Puede que el móvil ya la tenga. Comprueba su carpeta antes de volver a ofrecerla."));
+      const review = node("button", "", "He comprobado el destino; preparar otro envío");
+      review.type = "button";
+      review.disabled = busy;
+      review.onclick = () => { entry.status = "pending"; saveWaiting(); renderWaiting(); };
+      card.append(review);
+    }
+    const actions = node("div", "transfer-actions");
+    const send = node("button", "primary", "Enviar selección");
+    send.type = "button";
+    send.dataset.queueAction = "send";
+    send.disabled = busy || entry.status !== "pending" || !targetValid ||
+      !canOffer(sessionId, entry.target?.peerId ?? "");
+    send.onclick = () => { void sendWaiting(entry); };
+    const discard = node("button", "", "Eliminar selección");
+    discard.type = "button";
+    discard.dataset.queueAction = "remove";
+    discard.disabled = busy || entry.status === "offering";
+    discard.onclick = () => removeWaiting(entry);
+    actions.append(send, discard);
+    card.append(actions);
+    list.append(card);
+  }
+}
+const knownOfferRejections = new Set(["busy", "session_closed", "revoked", "source_changed", "io_error",
+  "invalid_request", "invalid_name", "limit_exceeded", "invalid_state", "not_found", "desktop_required"]);
+function maybeOfferWaiting(): void {
+  let changed = false;
+  for (const entry of waiting) {
+    if (entry.autoOffer && (entry.target?.sessionId !== latest?.session?.session_id ||
+      !latest?.peers.some((peer) => peer.id === entry.target?.peerId))) {
+      entry.autoOffer = false;
+      changed = true;
+    }
+  }
+  if (changed) { saveWaiting(); renderWaiting(); }
+  const next = waiting.find((entry) => entry.autoOffer && entry.target &&
+    canOffer(entry.target.sessionId, entry.target.peerId));
+  if (next && !busy) void sendWaiting(next);
+}
+async function sendWaiting(entry: QueuedSelection): Promise<void> {
+  const target = entry.target;
+  if (!target || entry.status !== "pending" || busy || !canOffer(target.sessionId, target.peerId)) return;
+  entry.autoOffer = false;
+  await action(async () => {
+    const available = await invoke<Source[]>("available_retry_sources", { sources: entry.sources });
+    if (available.length !== entry.sources.length) {
+      notice("Algún archivo cambió o ya no está disponible. La selección sigue en espera: quítalo o vuelve a elegir los archivos.", true);
+      return;
+    }
+    if (!canOffer(target.sessionId, target.peerId)) throw "busy";
+    // Persist the boundary before an IPC can authorize work. A reload at this point
+    // requires explicit review instead of silently creating a duplicate offer.
+    entry.status = "offering";
+    if (!saveWaiting()) {
+      entry.status = "pending";
+      notice("No se pudo guardar el estado de la cola antes de enviar. Vuelve a intentarlo.", true);
+      return;
+    }
+    try {
+      await offerSelection(available, target.peerId, target.sessionId, true);
+      removeWaiting(entry); // Ownership now belongs to the existing transfer/retry flow.
+    } catch (error) {
+      entry.status = knownOfferRejections.has(String(error)) ? "pending" : "review";
+      saveWaiting();
+      throw error;
+    }
+  });
+}
+async function chooseWaiting(): Promise<void> {
+  await action(async () => {
+    const sources = await invoke<Source[] | null>("choose_sources");
+    if (sources?.length) enqueueSources(sources);
+  });
+}
+type NativeDrop = { type: "enter" | "over" | "drop" | "leave"; paths?: string[]; position?: { x: number; y: number } };
+function dropPeer(event: NativeDrop): string {
+  if (!event.position || panels.some((id) => $<HTMLDialogElement>(id).open)) return "";
+  const ratio = window.devicePixelRatio || 1;
+  const target = document.elementFromPoint(event.position.x / ratio, event.position.y / ratio)
+    ?.closest<HTMLElement>("[data-drop-peer]");
+  const peerId = target?.dataset.dropPeer ?? "";
+  return latest?.session && latest.peers.some((peer) => peer.id === peerId) ? peerId : "";
+}
+function clearDropHighlight(): void {
+  for (const choice of document.querySelectorAll("[data-drop-peer]")) choice.classList.remove("drop-target");
+  $("waiting-panel").classList.remove("drop-target");
+}
+function nativeDrop(event: NativeDrop): void {
+  clearDropHighlight();
+  if (event.type === "leave") return;
+  const peerId = dropPeer(event);
+  if (event.type !== "drop") {
+    const highlighted = [...document.querySelectorAll<HTMLElement>("[data-drop-peer]")]
+      .find((choice) => choice.dataset.dropPeer === peerId);
+    (highlighted ?? $("waiting-panel")).classList.add("drop-target");
+    return;
+  }
+  const paths = event.paths ?? [];
+  if (!paths.length) return;
+  const target = peerId && latest?.session
+    ? { peerId, peerName: peerName(peerId), sessionId: latest.session.session_id } : null;
+  void invoke<Source[]>("inspect_sources", { paths }).then(async (sources) => {
+    if (!sources.length) return;
+    enqueueSources(sources, target, Boolean(target));
+    maybeOfferWaiting();
+  }).catch((error) => notice(messages[String(error)] ?? "No se pudieron añadir los archivos. Comprueba que sigan disponibles.", true));
+}
+
 const samples = new Map<
   string,
   { bytes: bigint; time: number; speed: number }
@@ -423,14 +641,14 @@ function updateControls(): void {
   $<HTMLButtonElement>("receive").disabled = !active || busy;
   $<HTMLButtonElement>("choose-folder").disabled = !active || busy;
   $<HTMLButtonElement>("send-file").disabled =
-    !active ||
-    !selectedPeer ||
-    hasPending ||
+    (active && Boolean(selectedPeer) && hasPending) ||
     incomingReserved() ||
     outgoingReserved() ||
     busy ||
     Boolean(batch) ||
     offering;
+  $<HTMLButtonElement>("queue-files").disabled = busy;
+  renderWaiting();
   renderBatch();
   renderRetry();
   $("receive").setAttribute(
@@ -821,6 +1039,8 @@ function renderPeers(): void {
   for (const peer of latest.peers) {
     const choice = node("button", "device-choice");
     choice.type = "button";
+    choice.dataset.dropPeer = peer.id;
+    choice.title = "Suelta archivos aquí para ofrecerlos a este dispositivo";
     choice.setAttribute("aria-pressed", String(peer.id === selectedPeer));
     const tile = node("span", "icon-tile");
     tile.append(icon("phone"));
@@ -1000,6 +1220,7 @@ async function refreshNow(): Promise<void> {
       `${disappeared.map((peer) => peer.name).join(", ")} ${disappeared.length === 1 ? "se ha desconectado" : "se han desconectado"}. Para volver a conectar, muestra un nuevo QR y escanéalo en el móvil.`,
     );
   updateControls();
+  maybeOfferWaiting();
 }
 $("session-form").onsubmit = (event) => {
   event.preventDefault();
@@ -1214,14 +1435,23 @@ $("retry-confirm").onclick = () => {
   });
 };
 
+$("queue-files").onclick = () => { void chooseWaiting(); };
 $("send-file").onclick = () => {
+  if (!latest?.session || !selectedPeer) { void chooseWaiting(); return; }
   void action(async () => {
     const peerId = selectedPeer;
     const sessionId = latest?.session?.session_id ?? "";
     if (!canOffer(sessionId, peerId)) return;
     const sources = await invoke<Source[] | null>("choose_sources");
-    if (sources?.length && canOffer(sessionId, peerId)) {
+    if (!sources?.length) return;
+    const target = { sessionId, peerId, peerName: peerName(peerId) };
+    if (!canOffer(sessionId, peerId)) { enqueueSources(sources, target); return; }
+    try {
       await offerSelection(sources, peerId, sessionId);
+    } catch (error) {
+      const entry = enqueueSources(sources, target);
+      if (!knownOfferRejections.has(String(error))) { entry.status = "review"; saveWaiting(); }
+      throw error;
     }
   });
 };
@@ -1319,7 +1549,12 @@ for (const id of panels)
       hideDescriptor();
     if (!panels.some((panel) => $<HTMLDialogElement>(panel).open)) markRail();
   });
-window.addEventListener("pagehide", hideDescriptor);
+let stopDropListener: (() => void) | undefined;
+const nativeWindow = window.__TAURI__?.webviewWindow?.getCurrentWebviewWindow();
+if (nativeWindow) void nativeWindow.onDragDropEvent(({ payload }) => nativeDrop(payload))
+  .then((unlisten) => { stopDropListener = unlisten; })
+  .catch(() => notice("No se pudo activar arrastrar y soltar. Usa Elegir archivos o Dejar en espera.", true));
+window.addEventListener("pagehide", () => { hideDescriptor(); stopDropListener?.(); });
 setInterval(() => {
   if (descriptorUntil) {
     const left = Math.ceil((descriptorUntil - performance.now()) / 1000);
