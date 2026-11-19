@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod network;
+mod taskbar;
+mod taskbar_progress;
 use file_transfer_core::{
     BatchStatus, Engine, Snapshot, SourceStamp,
     model::{Descriptor, Transfer},
@@ -46,8 +48,9 @@ async fn start_session(
     Err(last_error)
 }
 #[tauri::command]
-fn stop_session(core: Core<'_>) {
+fn stop_session(core: Core<'_>, window: tauri::Window) {
     core.stop_session();
+    taskbar::clear(&window);
 }
 #[tauri::command]
 fn open_pairing_window(core: Core<'_>) -> Result<Descriptor, String> {
@@ -135,37 +138,57 @@ struct ChosenSource {
 }
 #[tauri::command]
 async fn choose_sources(app: tauri::AppHandle) -> Result<Option<Vec<ChosenSource>>, String> {
-    app.dialog()
+    let paths = app
+        .dialog()
         .file()
         .set_title("Elige los archivos que quieres enviar")
         .blocking_pick_files()
         .map(|paths| {
             paths
                 .into_iter()
-                .map(|p| {
-                    let source = p.into_path().map_err(|_| "io_error".to_owned())?;
-                    let metadata = std::fs::metadata(&source).map_err(|_| "io_error".to_owned())?;
-                    if !metadata.is_file() {
-                        return Err("io_error".to_owned());
-                    }
-                    let file_name = source
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .ok_or_else(|| "invalid_name".to_owned())?
-                        .to_owned();
-                    Ok(ChosenSource {
-                        source,
-                        file_name,
-                        stamp: SourceStamp::new(
-                            metadata.len(),
-                            metadata.modified().map_err(|_| "io_error".to_owned())?,
-                        ),
-                    })
-                })
-                .collect()
+                .map(|p| p.into_path().map_err(|_| "io_error".to_owned()))
+                .collect::<Result<Vec<_>, _>>()
         })
-        .transpose()
+        .transpose()?;
+    match paths {
+        Some(paths) => inspect_sources(paths).await.map(Some),
+        None => Ok(None),
+    }
 }
+// Shared entry point for native drops and the file picker. A future folder picker
+// can expand directories here without teaching the UI about filesystem traversal.
+#[tauri::command]
+async fn inspect_sources(paths: Vec<PathBuf>) -> Result<Vec<ChosenSource>, String> {
+    tauri::async_runtime::spawn_blocking(move || inspect_paths(paths))
+        .await
+        .map_err(|_| "io_error".to_owned())?
+}
+fn inspect_paths(paths: Vec<PathBuf>) -> Result<Vec<ChosenSource>, String> {
+    paths
+        .into_iter()
+        .map(|source| {
+            let file = std::fs::File::open(&source).map_err(|_| "io_error".to_owned())?;
+            let metadata = file.metadata().map_err(|_| "io_error".to_owned())?;
+            if !metadata.is_file() {
+                return Err("files_only".to_owned());
+            }
+            let file_name = source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "invalid_name".to_owned())?
+                .to_owned();
+            Ok(ChosenSource {
+                source,
+                file_name,
+                stamp: SourceStamp::new(
+                    metadata.len(),
+                    metadata.modified().map_err(|_| "io_error".to_owned())?,
+                ),
+            })
+        })
+        .collect()
+}
+
 #[tauri::command]
 async fn available_retry_sources(sources: Vec<ChosenSource>) -> Result<Vec<ChosenSource>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -202,6 +225,8 @@ fn main() {
         .setup(|app| {
             let directory = app.path().app_data_dir()?;
             let core = Engine::open_ephemeral(directory, "PC personal")?;
+            let window = app.get_window("main").ok_or("missing main window")?;
+            app.manage(taskbar::start(window, core.clone()));
             app.manage(core);
             Ok(())
         })
@@ -211,6 +236,10 @@ fn main() {
                 tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
             ) {
                 window.state::<Arc<Engine>>().stop_session();
+                taskbar::clear(window);
+                if matches!(event, tauri::WindowEvent::Destroyed) {
+                    window.state::<taskbar::TaskbarWorker>().stop();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -228,6 +257,7 @@ fn main() {
             cancel_download_batch,
             cancel_transfer,
             choose_sources,
+            inspect_sources,
             available_retry_sources,
             choose_destination
         ])

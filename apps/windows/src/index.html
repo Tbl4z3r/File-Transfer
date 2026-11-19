@@ -151,6 +151,12 @@
             <p id="retry-label"></p>
             <button id="retry-send" class="primary" type="button">Reintentar</button>
           </div>
+          <section id="waiting-panel" class="panel waiting-panel" aria-labelledby="waiting-title">
+            <h2 id="waiting-title">Archivos en espera</h2>
+            <p id="waiting-count" class="hint" aria-live="polite">0 archivos en espera</p>
+            <p class="hint">Suelta sobre un dispositivo para ofrecerle los archivos cuando esté libre, o aquí para dejarlos en espera. Enviar siempre requiere aceptación en el móvil.</p>
+            <div id="waiting-files" class="waiting-files"></div>
+          </section>
         </section>
         <div class="side-content">
           <section class="devices">
@@ -162,11 +168,12 @@
           <section class="actions" aria-label="Enviar y recibir">
             <button id="send-file" class="primary" type="button" disabled>
               <svg class="icon" aria-hidden="true"><use href="#icon-up" /></svg
-              >Enviar archivos</button
+              >Elegir archivos</button
             ><button id="receive" type="button" aria-pressed="false" disabled>
               <svg class="icon" aria-hidden="true"><use href="#icon-down" /></svg
               ><span id="receive-label">Recibir</span>
             </button>
+            <button id="queue-files" type="button">Dejar en espera</button>
             <p id="action-hint" class="hint">
               Inicia una sesión para conectar el móvil.
             </p>

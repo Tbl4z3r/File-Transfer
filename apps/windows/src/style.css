@@ -699,3 +699,9 @@ textarea {
 #retry-uncertain-files {
   overflow-wrap: anywhere;
 }
+
+.waiting-panel { margin-top: 12px; }
+.waiting-files { max-height: 300px; overflow-y: auto; margin-top: 12px; }
+.waiting-selection + .waiting-selection { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 12px; }
+.waiting-targets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.waiting-targets button[aria-pressed="true"], .drop-target { outline: 2px solid var(--accent); outline-offset: 2px; }

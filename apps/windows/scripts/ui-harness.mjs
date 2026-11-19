@@ -1,6 +1,7 @@
 // DOM/IPC adapter for command and QR regression tests, excluded from the build.
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import { randomUUID } from "node:crypto";
 import { encodeConnectionCode } from "../dist/pairing-code.js";
 import { encodePairingQr } from "../dist/pairing-qr.js";
 export const fixture = JSON.parse(
@@ -19,7 +20,11 @@ const script = (
 ).replace(/^import .*?;\n/gm, "");
 const camel = (name) =>
   name.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
-export async function ui(encoder = encodePairingQr, initial = {}) {
+export async function ui(encoder = encodePairingQr, initial = {}, options = {}) {
+  const storage = options.storage ?? new Map();
+  let dragDropHandler;
+  let pointTarget = null;
+  let dropUnlistened = false;
   const elements = new Map();
   const roots = [];
   const calls = [];
@@ -134,6 +139,9 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
       }
       return this.tagName.toLowerCase() === selector;
     }
+    closest(selector) {
+      return this.matches(selector) ? this : this.parentElement?.closest(selector) ?? null;
+    }
     querySelectorAll(selector) {
       return this.descendants().filter((child) =>
         selector.split(",").some((part) => child.matches(part.trim())),
@@ -188,6 +196,7 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
     roots.push(element);
   }
   document = {
+    elementFromPoint: (x, y) => { options.onPoint?.(x, y); return pointTarget; },
     getElementById: (id) => {
       if (!elements.has(id)) throw new Error(`Missing DOM id: ${id}`);
       return elements.get(id);
@@ -219,10 +228,19 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
     snapshotHandler = null;
   const context = {
     document,
+    crypto: { randomUUID },
     window: {
       addEventListener: (event, callback) =>
         windowListeners.set(event, callback),
+      devicePixelRatio: options.ratio ?? 1,
+      localStorage: {
+        getItem: (key) => storage.get(key) ?? null,
+        setItem: (key, value) => { if (options.storageFail) throw new Error("Storage denied"); storage.set(key, value); },
+      },
       __TAURI__: {
+        webviewWindow: { getCurrentWebviewWindow: () => ({
+          onDragDropEvent: async (callback) => { dragDropHandler = callback; return () => { dropUnlistened = true; }; },
+        }) },
         core: {
           invoke: async (command, args) => {
             calls.push({ command, args });
@@ -264,6 +282,9 @@ export async function ui(encoder = encodePairingQr, initial = {}) {
     document,
     snapshot,
     calls,
+    storage,
+    drop: async (payload, target = null) => { pointTarget = target; dragDropHandler({ payload }); await settle(); },
+    dropUnlistened: () => dropUnlistened,
     clipboard,
     blockClipboard: () => { clipboardBlocked = true; },
     settle,
