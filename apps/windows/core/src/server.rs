@@ -278,6 +278,8 @@ async fn route(engine: Arc<Engine>, request: Request<Body>) -> Result<Response<B
         "batch"
     } else if path.starts_with("/v1/download-batches/") {
         "download_batch"
+    } else if path == "/v1/folder-support" {
+        "folder_support"
     } else if path == "/v1/inbox" {
         "inbox"
     } else if path == "/v1/disconnect" {
@@ -299,8 +301,12 @@ async fn route(engine: Arc<Engine>, request: Request<Body>) -> Result<Response<B
     }
     if route == "pair" {
         let supports_inbox = unique_header(request.headers(), "x-ft-inbox") == Some("v1");
+        let supports_folders = unique_header(request.headers(), "x-ft-folders") == Some("v1");
         let request = parse_json::<PairRequest>(request, engine.timeouts.headers).await?;
-        return Ok(json_response(201, &engine.pair(request, supports_inbox)?));
+        return Ok(json_response(
+            201,
+            &engine.pair(request, supports_inbox, supports_folders)?,
+        ));
     }
     let peer = engine.authenticate(
         unique_header(request.headers(), "x-device-id").unwrap_or(""),
@@ -315,6 +321,9 @@ async fn route(engine: Arc<Engine>, request: Request<Body>) -> Result<Response<B
             200,
             &serde_json::json!({"disconnected":true}),
         ));
+    }
+    if route == "folder_support" {
+        return Ok(json_response(200, &serde_json::json!({"folders":true})));
     }
     if route == "inbox" {
         return Ok(json_response(200, &engine.inbox(&peer)?));

@@ -25,7 +25,9 @@ pub struct BatchStatus {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateBatch {
-    pub files: Vec<CreateUpload>,
+    pub files: Vec<folders::ManifestFile>,
+    #[serde(default, deserialize_with = "folders::nonempty_directories")]
+    pub directories: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +49,8 @@ pub enum UnsentState {
 #[derive(Clone, Serialize)]
 pub struct BatchFile {
     pub file_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relative_path: Option<String>,
     pub size_bytes: String,
     pub transfer_id: Option<String>,
     pub state: BatchFileState,
@@ -57,10 +61,13 @@ pub struct LocalUploadBatch {
     pub peer_id: String,
     pub state: BatchState,
     pub files: Vec<BatchFile>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub directories: Vec<String>,
 }
 pub(crate) struct SessionBatch {
     pub local: LocalUploadBatch,
     pub(crate) directory: Option<PathBuf>,
+    pub(crate) directory_paths: HashMap<String, PathBuf>,
     pub(crate) sources: Vec<Source>,
     pub(crate) changed: Instant,
 }
@@ -100,7 +107,7 @@ impl Engine {
         }
     }
     fn sync_batch(batch: &mut SessionBatch, records: &VecDeque<Record>) {
-        if batch.local.state.terminal() {
+        if batch.local.state.terminal() || batch.local.state == BatchState::AwaitingAcceptance {
             return;
         }
         for file in &mut batch.local.files {
@@ -259,15 +266,7 @@ impl Engine {
         if !inner.receive {
             return Err(Fault::new(409, "receive_disabled"));
         }
-        if !(2..=64).contains(&request.files.len()) {
-            return Err(Fault::new(400, "invalid_request"));
-        }
-        for file in &request.files {
-            if !valid_name(&file.file_name) {
-                return Err(Fault::new(400, "invalid_name"));
-            }
-            parse_size(&file.size_bytes).ok_or(Fault::new(400, "invalid_request"))?;
-        }
+        folders::validate_manifest(&request.files, &request.directories)?;
         if Self::batch_busy(&inner) || inner.records.iter().any(|r| !r.transfer.state.terminal()) {
             return Err(Fault::new(409, "busy"));
         }
@@ -281,13 +280,16 @@ impl Engine {
                     .into_iter()
                     .map(|f| BatchFile {
                         file_name: f.file_name,
+                        relative_path: f.relative_path,
                         size_bytes: f.size_bytes,
                         transfer_id: None,
                         state: BatchFileState::Unsent(UnsentState::Pending),
                     })
                     .collect(),
+                directories: request.directories,
             },
             directory: None,
+            directory_paths: HashMap::new(),
             sources: Vec::new(),
             changed: Instant::now(),
         };
@@ -325,9 +327,15 @@ impl Engine {
         }
         // Probe access at approval, then repeat preflight and journal each actual file.
         drop(store::partial(&directory).map_err(|e| io_fault(&e))?);
+        let paths = folders::prepare_directories(&directory, &batch.local.directories)?;
         let batch = inner.upload_batch.as_mut().unwrap();
         batch.directory = Some(directory);
-        batch.local.state = BatchState::Accepted;
+        batch.directory_paths = paths;
+        batch.local.state = if batch.local.files.is_empty() {
+            BatchState::Completed
+        } else {
+            BatchState::Accepted
+        };
         batch.changed = Instant::now();
         Ok(batch.status())
     }
@@ -364,7 +372,17 @@ impl Engine {
         let file = &batch.local.files[index];
         let name = file.file_name.clone();
         let size = parse_size(&file.size_bytes).unwrap();
-        let destination = batch.directory.clone().unwrap();
+        let folder_paths = !batch.local.directories.is_empty();
+        let destination = if let Some(relative) = &file.relative_path {
+            let parent = relative.rsplit_once('/').unwrap().0;
+            batch
+                .directory_paths
+                .get(parent)
+                .cloned()
+                .ok_or(Fault::new(500, "io_error"))?
+        } else {
+            batch.directory.clone().unwrap()
+        };
         let transfer = Self::new_record(
             &mut inner,
             &peer.id,
@@ -377,6 +395,7 @@ impl Engine {
         inner.upload_batch.as_mut().unwrap().local.files[index].transfer_id =
             Some(transfer.transfer_id.clone());
         let record_index = inner.records.len() - 1;
+        inner.records[record_index].folder_paths = folder_paths;
         match self.accept_upload_locked(&mut inner, record_index, &destination) {
             Ok(transfer) => {
                 Self::sync_batches_locked(&mut inner);

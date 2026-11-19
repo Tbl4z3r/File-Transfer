@@ -36,6 +36,11 @@ enum Command {
         sources: Vec<PathBuf>,
         session_id: String,
     },
+    OfferFolderBatch {
+        peer_id: String,
+        sources: Vec<PathBuf>,
+        session_id: String,
+    },
     CancelDownloadBatch {
         batch_id: String,
     },
@@ -111,6 +116,16 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         sources,
                         session_id,
                     } => serde_json::to_value(core.offer_download_batch(
+                        &peer_id,
+                        sources,
+                        &session_id,
+                    )?)
+                    .unwrap(),
+                    Command::OfferFolderBatch {
+                        peer_id,
+                        sources,
+                        session_id,
+                    } => serde_json::to_value(core.offer_folder_batch(
                         &peer_id,
                         sources,
                         &session_id,

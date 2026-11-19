@@ -8,11 +8,15 @@ use crate::{
 pub(crate) struct InboxFile {
     file_name: String,
     size_bytes: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relative_path: Option<String>,
 }
 #[derive(Serialize)]
 pub(crate) struct InboxBatch {
     batch_id: String,
     files: Vec<InboxFile>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    directories: Vec<String>,
 }
 #[derive(Serialize)]
 pub(crate) struct Inbox {
@@ -23,6 +27,7 @@ impl SessionBatch {
     fn preview(&self) -> InboxBatch {
         InboxBatch {
             batch_id: self.local.batch_id.clone(),
+            directories: self.local.directories.clone(),
             files: self
                 .local
                 .files
@@ -30,6 +35,7 @@ impl SessionBatch {
                 .map(|file| InboxFile {
                     file_name: file.file_name.clone(),
                     size_bytes: file.size_bytes.clone(),
+                    relative_path: file.relative_path.clone(),
                 })
                 .collect(),
         }
@@ -84,8 +90,69 @@ impl Engine {
         session_id: &str,
         expected: Option<&[SourceStamp]>,
     ) -> Result<BatchStatus> {
-        if !(2..=64).contains(&sources.len())
+        self.offer_download_manifest(peer, sources, session_id, expected, vec![], vec![])
+    }
+    pub fn offer_folder_batch(
+        &self,
+        peer: &str,
+        sources: Vec<PathBuf>,
+        session_id: &str,
+    ) -> Result<BatchStatus> {
+        let selection = folders::inspect_selection(sources)?;
+        self.offer_folder_selection(peer, selection, session_id)
+    }
+    pub fn offer_folder_selection(
+        &self,
+        peer: &str,
+        selection: FolderSelection,
+        session_id: &str,
+    ) -> Result<BatchStatus> {
+        selection.validate()?;
+        if selection.directories.is_empty() {
+            return Err(Fault::new(400, "invalid_request"));
+        }
+        let directories = selection
+            .directories
+            .iter()
+            .map(|dir| dir.relative_path.clone())
+            .collect();
+        let relative = selection
+            .sources
+            .iter()
+            .map(|source| source.relative_path.clone())
+            .collect();
+        let stamps: Vec<_> = selection
+            .sources
+            .iter()
+            .map(|source| source.stamp.clone())
+            .collect();
+        let sources = selection
+            .sources
+            .into_iter()
+            .map(|source| source.source)
+            .collect();
+        self.offer_download_manifest(
+            peer,
+            sources,
+            session_id,
+            Some(&stamps),
+            directories,
+            relative,
+        )
+    }
+    fn offer_download_manifest(
+        &self,
+        peer: &str,
+        sources: Vec<PathBuf>,
+        session_id: &str,
+        expected: Option<&[SourceStamp]>,
+        directories: Vec<String>,
+        relative: Vec<Option<String>>,
+    ) -> Result<BatchStatus> {
+        if sources.len() > 64
+            || (directories.is_empty() && !(2..=64).contains(&sources.len()))
             || expected.is_some_and(|stamps| stamps.len() != sources.len())
+            || (!directories.is_empty() && relative.len() != sources.len())
         {
             return Err(Fault::new(400, "invalid_request"));
         }
@@ -108,18 +175,33 @@ impl Engine {
                 state: BatchState::AwaitingAcceptance,
                 files: selected
                     .iter()
-                    .map(|(name, source)| BatchFile {
+                    .enumerate()
+                    .map(|(index, (name, source))| BatchFile {
                         file_name: name.clone(),
+                        relative_path: relative.get(index).cloned().flatten(),
                         size_bytes: source.len.to_string(),
                         transfer_id: None,
                         state: BatchFileState::Unsent(UnsentState::Pending),
                     })
                     .collect(),
+                directories,
             },
             directory: None,
+            directory_paths: HashMap::new(),
             sources: selected.into_iter().map(|(_, source)| source).collect(),
             changed: Instant::now(),
         };
+        let manifest: Vec<_> = batch
+            .local
+            .files
+            .iter()
+            .map(|file| folders::ManifestFile {
+                file_name: file.file_name.clone(),
+                size_bytes: file.size_bytes.clone(),
+                relative_path: file.relative_path.clone(),
+            })
+            .collect();
+        folders::validate_manifest(&manifest, &batch.local.directories)?;
         // Validate the full response including JSON escaping before publishing a reservation.
         let preview = Inbox {
             transfer: None,
@@ -142,6 +224,9 @@ impl Engine {
             return Err(Fault::new(409, "session_closed"));
         }
         Self::ensure_peer(&inner, peer)?;
+        if !batch.local.directories.is_empty() && !inner.folder_peers.contains(peer) {
+            return Err(Fault::new(409, "folders_unsupported"));
+        }
         if Self::batch_busy(&inner) || inner.records.iter().any(|r| !r.transfer.state.terminal()) {
             return Err(Fault::new(409, "busy"));
         }
@@ -183,7 +268,11 @@ impl Engine {
         if batch.local.state != BatchState::AwaitingAcceptance {
             return Err(Fault::new(409, "invalid_state"));
         }
-        batch.local.state = BatchState::Accepted;
+        batch.local.state = if batch.local.files.is_empty() {
+            BatchState::Completed
+        } else {
+            BatchState::Accepted
+        };
         batch.changed = Instant::now();
         Ok(batch.status())
     }
@@ -209,6 +298,7 @@ impl Engine {
         }
         let name = batch.local.files[index].file_name.clone();
         let source = batch.sources[index].clone();
+        let folder_paths = !batch.local.directories.is_empty();
         let transfer = Self::new_record(
             &mut inner,
             &peer.id,
@@ -221,6 +311,7 @@ impl Engine {
         inner.download_batch.as_mut().unwrap().local.files[index].transfer_id =
             Some(transfer.transfer_id.clone());
         let record = inner.records.back_mut().unwrap();
+        record.folder_paths = folder_paths;
         record.transfer.state = TransferState::Ready;
         let result = record.transfer.clone();
         Self::sync_batches_locked(&mut inner);
