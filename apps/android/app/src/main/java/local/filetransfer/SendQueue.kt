@@ -6,6 +6,8 @@ internal data class SendQueueProgress(
     val total: Int,
     val completed: Int,
     val running: Boolean,
+    val completedBytes: Long = 0,
+    val totalBytes: Long? = null,
 ) {
     val pending: Int get() = total - current
 }
@@ -29,3 +31,8 @@ internal class SendQueue<T>(private val items: List<T>) {
 }
 
 internal class SendSelectionException(message: String) : IllegalArgumentException(message)
+
+/** Count the current body once, including stopped batches whose final item was confirmed. */
+internal fun SendQueueProgress.bytesWith(currentBytes: Long): Long =
+    (completedBytes + if (current > completed) currentBytes.coerceAtLeast(0) else 0L)
+        .let { if (totalBytes == null) it else it.coerceAtMost(totalBytes) }

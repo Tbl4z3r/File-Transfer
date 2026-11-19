@@ -38,6 +38,7 @@ import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
     private data class RetryConnection(val peer: RetryPeer, val refreshInbox: Boolean)
+    private data class SharedSelection(val uris: List<Uri>, val peer: RetryPeer?)
 
     private class Session {
         val worker = Executors.newSingleThreadExecutor()
@@ -68,6 +69,10 @@ class MainActivity : ComponentActivity() {
         val reconnectFor = mutableStateOf<RetryConnection?>(null)
         val sendQueue = mutableStateOf<SendQueueProgress?>(null)
         val activity = mutableStateOf(listOf<TransferPresentation>())
+        var outgoingStore: OutgoingQueueStore? = null
+        val outgoing = mutableStateOf(OutgoingState())
+        val shared = mutableStateOf(listOf<SharedSelection>())
+        val visible = mutableStateOf(false)
 
         fun record(entry: TransferPresentation) {
             activity.value = (activity.value.filterNot { entry.id != null && it.id == entry.id } + entry).takeLast(32)
@@ -80,6 +85,7 @@ class MainActivity : ComponentActivity() {
         private var backgroundSession: Session? = null
     }
     private lateinit var session: Session
+    private var consumedLaunchShare = false
     private val worker get() = session.worker
     private var client: ProtocolClient?
         get() = session.client
@@ -163,6 +169,18 @@ class MainActivity : ComponentActivity() {
         session = backgroundSession
             ?: (lastCustomNonConfigurationInstance as? Session) ?: Session()
         session.uiOwner = this
+        if (session.outgoingStore == null) {
+            val store = OutgoingQueueStore(File(noBackupFilesDir, "outgoing"))
+            session.outgoingStore = store
+            session.outgoing.value = store.state
+            if (store.recoveryNotice) session.message.value = "Se retiraron copias incompletas o no disponibles de la cola. Vuelve a compartir los archivos que falten."
+            if (preferences.getBoolean("share_copy_pending", false)) {
+                session.message.value = "Se interrumpió la preparación de archivos compartidos. Solo los archivos que aparecen en la cola están guardados; vuelve a compartir los que falten."
+                preferences.edit().putBoolean("share_copy_pending", false).apply()
+            }
+        }
+        consumedLaunchShare = savedInstanceState?.getBoolean("share_consumed") == true
+        if (!consumedLaunchShare) acceptSharedIntent(intent)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
@@ -197,6 +215,28 @@ class MainActivity : ComponentActivity() {
             var sendQueue by remember { session.sendQueue }
             val activity by remember { session.activity }
             var batchOffer by remember { session.batchOffer }
+            val outgoing by remember { session.outgoing }
+            val visible by remember { session.visible }
+            val shared by remember { session.shared }
+            var selectedFiles by remember { mutableStateOf<List<Uri>>(emptyList()) }
+            val outgoingStore = checkNotNull(session.outgoingStore)
+            fun queueUri(entry: OutgoingFile) = Uri.fromFile(outgoingStore.file(entry))
+            fun queued(uri: Uri) = outgoingStore.state.files.find { queueUri(it) == uri }
+            fun refreshOutgoing() { session.outgoing.value = outgoingStore.state }
+            fun changeOutgoing(action: () -> Unit): Boolean = try {
+                action(); refreshOutgoing(); true
+            } catch (error: Exception) {
+                diagnostic = TransferDiagnostics.describe("queue_save", error)
+                message = "No se pudo actualizar la cola. Comprueba el espacio libre y vuelve a intentarlo."
+                false
+            }
+            fun removeOutgoing(entry: OutgoingFile): Boolean {
+                if (!changeOutgoing { outgoingStore.remove(entry.id) }) return false
+                uploadRetry = uploadRetry?.let { retry ->
+                    retry.copy(remaining = retry.remaining - queueUri(entry), uncertain = retry.uncertain?.takeUnless { it == queueUri(entry) })
+                }?.takeIf { it.remaining.isNotEmpty() }
+                return true
+            }
             var dialog by remember { mutableStateOf<String?>(null) }
             var folderLocation by remember { mutableStateOf<ReceiveLocation?>(null) }
             var folderPath by remember { mutableStateOf(listOf<ReceiveFolderEntry>()) }
@@ -261,7 +301,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
             val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
-            fun post(stage: String = "operation", transferOperation: Boolean = false, block: () -> Unit) {
+            fun post(stage: String = "operation", transferOperation: Boolean = false, sourceUris: List<Uri> = emptyList(), block: () -> Unit) {
                 val operationGeneration = session.generation
                 session.operationEpoch++
                 session.backgroundTimedOut = false
@@ -273,9 +313,11 @@ class MainActivity : ComponentActivity() {
                 val execute = {
                     worker.execute {
                         session.operationGeneration.set(operationGeneration)
+                        var finalNotice = "Abre File Transfer para consultar el resultado."
                         try {
                             if (operationGeneration == session.generation && !cancelled) block()
                         } catch (error: Exception) {
+                            finalNotice = if (cancelled) "Transferencia cancelada" else "Transferencia no completada; consulta el resultado."
                             val details = TransferDiagnostics.describe(operationStage, error)
                             val explanation = if (session.backgroundTimedOut)
                                 "Android terminó el tiempo permitido para esta transferencia. Los archivos verificados se conservan; vuelve a enviar los pendientes."
@@ -284,8 +326,14 @@ class MainActivity : ComponentActivity() {
                             updateUi { diagnostic = details; message = explanation }
                         } finally {
                             transferId = null
-                            foregroundId?.let { ActiveTransfer.finish(applicationContext, it) }
+                            val notice = finalNotice
+                            val wasCancelled = cancelled
+                            foregroundId?.let { id -> runOnUiThread {
+                                val outcome = if (wasCancelled) "Transferencia cancelada" else session.transfer.value?.result ?: notice
+                                ActiveTransfer.finish(applicationContext, id, outcome.takeUnless { stage == "queue_import" })
+                            } }
                             updateUi {
+                                if (stage == "queue_import" && session.shared.value.isEmpty()) preferences.edit().putBoolean("share_copy_pending", false).apply()
                                 busy = false
                                 if (session.uiOwner == null) {
                                     session.disposePoll?.invoke()
@@ -299,7 +347,7 @@ class MainActivity : ComponentActivity() {
                 }
                 if (transferOperation || stage == "confirm") {
                     backgroundSession = session
-                    foregroundId = ActiveTransfer.start(applicationContext, ready = execute, cancel = { timeout ->
+                    foregroundId = ActiveTransfer.start(applicationContext, sourceUris = sourceUris, ready = execute, cancel = { timeout ->
                         session.backgroundTimedOut = timeout
                         cancelled = true
                         client?.interrupt()
@@ -437,16 +485,23 @@ class MainActivity : ComponentActivity() {
                 val peer = pair?.retryPeer() ?: return
                 if (requiredPeer != null && requiredPeer != peer) return
                 if (uris.isNotEmpty() && !busy && pending == null && offer == null && batchOffer == null) {
+                    if (!changeOutgoing { outgoingStore.attempt(uris.mapNotNull { queued(it)?.id }.toSet(), peer) }) return
                     uploadRetry = UploadRetry(peer, uris.distinct(), uncertain)
                     inboxRetry = null
                     transfer = null
                     sendQueue = null
+                    // Persist before dispatch: process recreation never automatically replays an attempt.
                     post("send", transferOperation = true) {
                         val selected = uris.distinct()
                         if (selected.size > 64) throw SendSelectionException("Selecciona como máximo 64 archivos por envío.")
                         // Freeze every name/size before any network request, including legacy fallback.
                         val prepared = selected.map { uri ->
                             check(!cancelled) { "Cancelada" }
+                            val local = queued(uri)
+                            if (local != null) {
+                                if (outgoingStore.file(local).length() != local.size) throw SendSelectionException("El archivo de la cola ya no está disponible. Elimínalo y vuelve a seleccionarlo.")
+                                return@map uri to UploadFile(local.name, local.size)
+                            }
                             val cursor = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
                                 ?: throw SendSelectionException("El proveedor no permite leer este archivo. Vuelve a seleccionarlo desde Archivos.")
                             val (name, size) = cursor.use {
@@ -466,7 +521,8 @@ class MainActivity : ComponentActivity() {
                         val c = connected()
                         val authorization = UploadAuthorization(c, prepared.map { it.second })
                         var confirmationPending = false
-                        var queueState = SendQueueProgress(0, prepared.size, 0, true)
+                        val batchBytes = prepared.sumOf { it.second.size }
+                        var queueState = SendQueueProgress(0, prepared.size, 0, true, totalBytes = batchBytes)
                         try {
                             updateUi { sendQueue = queueState }
                             authorization.request({ cancelled }) {
@@ -474,8 +530,12 @@ class MainActivity : ComponentActivity() {
                             }
                             updateUi { message = "" }
                             SendQueue(prepared.withIndex().toList()).run({ cancelled }, { state ->
-                                queueState = state
-                                updateUi { sendQueue = state }
+                                queueState = state.copy(completedBytes = prepared.take(state.completed).sumOf { it.second.size }, totalBytes = batchBytes)
+                                val snapshot = queueState
+                                updateUi {
+                                    if (snapshot.running && sendQueue?.current != snapshot.current) transfer = null
+                                    sendQueue = snapshot
+                                }
                             }) { (index, source) ->
                                 val (uri, file) = source
                                 val (name, size) = file
@@ -519,7 +579,7 @@ class MainActivity : ComponentActivity() {
                                     require(state.id == t.id)
                                     requireReadyUpload(state, file)
                                     itemPhase("Enviando al PC")
-                                    val inputStream = contentResolver.openInputStream(uri)
+                                    val inputStream = queued(uri)?.let { outgoingStore.file(it).inputStream() } ?: contentResolver.openInputStream(uri)
                                         ?: throw SendSelectionException("No se pudo abrir este archivo. Vuelve a seleccionarlo desde Archivos.")
                                     val started = System.nanoTime()
                                     val (remote, hash) = inputStream.use { input ->
@@ -537,6 +597,7 @@ class MainActivity : ComponentActivity() {
                                     val generation = session.operationGeneration.get()
                                     val markUncertain = FutureTask {
                                         if (generation == session.generation && !cancelled) {
+                                            queued(uri)?.let { outgoingStore.uncertain(it.id); refreshOutgoing() }
                                             uploadRetry = checkNotNull(uploadRetry).confirming(uri)
                                             true
                                         } else false
@@ -558,7 +619,10 @@ class MainActivity : ComponentActivity() {
                                         when {
                                             remoteState?.state == "completed" && remoteState.sha256 == hash -> {
                                                 itemFinish("Enviado y verificado")
-                                                updateUi { uploadRetry = uploadRetry?.confirmed(uri) }
+                                                updateUi {
+                                                    queued(uri)?.let { entry -> changeOutgoing { outgoingStore.remove(entry.id) } }
+                                                    uploadRetry = uploadRetry?.confirmed(uri)
+                                                }
                                                 return@run true
                                             }
                                             remoteState?.state in setOf("cancelled", "failed") -> {
@@ -575,7 +639,10 @@ class MainActivity : ComponentActivity() {
                                         return@run false
                                     }
                                     itemFinish("Enviado y verificado")
-                                    updateUi { uploadRetry = uploadRetry?.confirmed(uri) }
+                                    updateUi {
+                                        queued(uri)?.let { entry -> changeOutgoing { outgoingStore.remove(entry.id) } }
+                                        uploadRetry = uploadRetry?.confirmed(uri)
+                                    }
                                     true
                                 } catch (e: Exception) { if (!verifiedUpload && sameGeneration()) runCatching { c.cancel(t.id) }; throw e }
                                 finally { transferId = null }
@@ -591,7 +658,52 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
-            val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { startUpload(it) }
+            fun enqueue(uris: List<Uri>, sendWhenConnected: Boolean, intendedPeer: RetryPeer? = pair?.retryPeer()) {
+                if (uris.isEmpty() || busy || pending != null) return
+                transfer = null
+                sendQueue = null
+                post("queue_import", transferOperation = true, sourceUris = uris) {
+                    val sources = uris.distinct().map { uri ->
+                        val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                            val column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                            if (cursor.moveToFirst() && column >= 0 && !cursor.isNull(column)) cursor.getString(column) else null
+                        } ?: throw SendSelectionException("No se pudo leer el nombre del archivo compartido. Guárdalo en Archivos y vuelve a seleccionarlo.")
+                        OutgoingSource(name) { contentResolver.openInputStream(uri) ?: throw java.io.IOException("No se pudo abrir el archivo compartido") }
+                    }
+                    outgoingStore.importFiles(sources, sendWhenConnected, intendedPeer) { cancelled }
+                    updateUi {
+                        refreshOutgoing()
+                        message = if (sendWhenConnected) "Archivos en cola. Se enviarán al conectar con el PC mientras esta pantalla esté abierta."
+                            else "Archivos en espera. Pulsa Enviar cola cuando quieras enviarlos."
+                    }
+                }
+            }
+            val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+                if (uris.isNotEmpty()) { selectedFiles = uris; dialog = "queue_selection" }
+            }
+            LaunchedEffect(shared, busy, pending) {
+                if (!busy && pending == null && shared.isNotEmpty()) {
+                    val selection = shared.first()
+                    session.shared.value = shared.drop(1)
+                    settingsOpen = false
+                    dialog = null
+                    enqueue(selection.uris, true, selection.peer)
+                }
+            }
+            LaunchedEffect(pair, busy, outgoing, visible, offer, batchOffer, pending, shared, settingsOpen, dialog) {
+                if (visible && !settingsOpen && dialog == null && pair != null && !busy && outgoing.armed && outgoing.files.isNotEmpty() &&
+                    pending == null && offer == null && batchOffer == null && shared.isEmpty()) {
+                    val eligible = pair?.let { outgoing.automaticFiles(it.retryPeer()) }.orEmpty()
+                    if (eligible.isNotEmpty()) startUpload(eligible.map(::queueUri))
+                }
+            }
+            fun sendOutgoing() {
+                if (pair != null && outgoing.files.any { it.peer != null && it.peer != pair?.retryPeer() }) dialog = "queue_destination"
+                else if (outgoing.files.any { it.uncertain }) dialog = "queue_uncertain"
+                else if (pair == null) {
+                    if (changeOutgoing { outgoingStore.arm(true) }) message = "Cola preparada. Escanea el QR del PC para enviarla."
+                } else startUpload(outgoing.files.map(::queueUri))
+            }
             DisposableEffect(pair) {
                 session.disposePoll?.invoke()
                 val p = pair
@@ -722,8 +834,8 @@ class MainActivity : ComponentActivity() {
                         for ((index, file) in selected.files.withIndex()) {
                             check(!cancelled)
                             current = index + 1
-                            val queue = SendQueueProgress(current, selected.files.size, completed, true)
-                            updateUi { sendQueue = queue }
+                            val queue = SendQueueProgress(current, selected.files.size, completed, true, selected.files.take(completed).sumOf { it.size }, selected.files.sumOf { it.size })
+                            updateUi { sendQueue = queue; transfer = null }
                             updateUi { transfer = TransferPresentation(file.name, file.size, "download", phase = "Preparando recepción") }
                             val ready = c.startDownloadBatchFile(selected.id, index)
                             transferId = ready.id
@@ -739,7 +851,7 @@ class MainActivity : ComponentActivity() {
                         }
                     } finally {
                         if (completed < selected.files.size && sameGeneration()) runCatching { c.cancelDownloadBatch(selected.id) }
-                        val queue = SendQueueProgress(current, selected.files.size, completed, false)
+                        val queue = SendQueueProgress(current, selected.files.size, completed, false, selected.files.take(completed).sumOf { it.size }, selected.files.sumOf { it.size })
                         updateUi { sendQueue = queue }
                     }
                 }
@@ -795,6 +907,7 @@ class MainActivity : ComponentActivity() {
                     pairedName = pair?.serverName?.takeIf { it.isNotBlank() }, pairedHost = pair?.let { "${it.host}:${it.port}" },
                     deviceName = deviceName, destination = destination, busy = busy,
                     busyLabel = when (operationStage) {
+                        "queue_import" -> "Guardando archivos en la cola…"
                         "choose_folder" -> "Actualizando carpeta…"
                         "offers" -> "Consultando archivos del PC…"
                         "reject" -> "Rechazando solicitud…"
@@ -804,6 +917,10 @@ class MainActivity : ComponentActivity() {
                     },
                     cancellable = busy && operationStage != "choose_folder",
                     message = message, transfer = transfer, sendQueue = sendQueue, offer = visibleOffer, batchOffer = batchOffer, activity = activity,
+                    outgoing = outgoing, queuedForOtherPeer = pair != null && outgoing.files.any { it.armed && it.peer != null && it.peer != pair?.retryPeer() },
+                    onSendOutgoing = ::sendOutgoing,
+                    onHoldOutgoing = { changeOutgoing { outgoingStore.arm(false) } },
+                    onRemoveOutgoing = { removeOutgoing(it) },
                     hasPending = pending != null,
                     canRetrySend = uploadRetry?.let { pair == null || pair?.retryPeer() == it.peer } == true,
                     canRetryInbox = inboxRetry?.let { pair == null || pair?.retryPeer() == it } == true,
@@ -881,7 +998,10 @@ class MainActivity : ComponentActivity() {
                             pendingUploadBatchId = null
                             finish(if (transfer?.direction == "download") "Recibido y verificado" else "Enviado y verificado")
                             updateUi {
-                                session.pendingUploadSource?.let { uploadRetry = uploadRetry?.confirmed(it) }
+                                session.pendingUploadSource?.let { uri ->
+                                    queued(uri)?.let { entry -> changeOutgoing { outgoingStore.remove(entry.id) } }
+                                    uploadRetry = uploadRetry?.confirmed(uri)
+                                }
                                 session.pendingUploadSource = null
                                 if (uploadRetry?.remaining?.isEmpty() == true) uploadRetry = null
                                 if (transfer?.direction == "download" && sendQueue == null) inboxRetry = null
@@ -894,6 +1014,40 @@ class MainActivity : ComponentActivity() {
                     onOpenReceived = { openFile(it.uri, it.location.tree) }, onOpenLocation = ::openLocation,
                 )
                 when (dialog) {
+                    "queue_destination" -> AlertDialog(
+                        onDismissRequest = { dialog = null },
+                        title = { Text("¿Enviar la cola a este PC?") },
+                        text = { Text("Hay archivos preparados para otro PC. El PC conectado ahora es ${pair?.serverName ?: "el seleccionado"}.") },
+                        confirmButton = { TextButton(onClick = {
+                            dialog = null
+                            if (outgoing.files.any { it.uncertain }) dialog = "queue_uncertain"
+                            else startUpload(outgoing.files.map(::queueUri))
+                        }) { Text("Enviar a este PC") } },
+                        dismissButton = { TextButton(onClick = { dialog = null }) { Text("Volver") } },
+                    )
+                    "queue_selection" -> EssentialDialog("Archivos seleccionados", { selectedFiles = emptyList(); dialog = null }) {
+                        Text("${selectedFiles.size} archivos. Se copiarán a la cola privada de File Transfer; necesitan espacio libre en el teléfono.")
+                        Button(onClick = { val uris = selectedFiles; selectedFiles = emptyList(); dialog = null; enqueue(uris, true) }) {
+                            Text(if (pair == null) "Enviar al conectar" else "Enviar ahora")
+                        }
+                        TextButton(onClick = { val uris = selectedFiles; selectedFiles = emptyList(); dialog = null; enqueue(uris, false) }) { Text("Dejar en espera") }
+                    }
+                    "queue_uncertain" -> AlertDialog(
+                        onDismissRequest = { dialog = null },
+                        title = { Text("Comprueba los archivos sin confirmar") },
+                        text = { Text("El PC pudo guardar los archivos marcados sin confirmar. Comprueba el destino antes de reenviarlos para evitar copias duplicadas.") },
+                        confirmButton = { TextButton(onClick = {
+                            dialog = null
+                            if (pair == null) { message = "Conecta con el PC y pulsa Enviar cola para confirmar el reenvío." }
+                            else startUpload(outgoing.files.map(::queueUri))
+                        }) { Text("Reenviar todos") } },
+                        dismissButton = { TextButton(onClick = {
+                            if (outgoing.files.filter { it.uncertain }.all(::removeOutgoing)) {
+                                dialog = null
+                                message = "Se retiraron los archivos sin confirmar de la cola."
+                            }
+                        }) { Text("Retirar sin confirmar") } },
+                    )
                     "batch_detail" -> EssentialDialog("Detalle del lote", { dialog = null }) {
                         batchOffer?.let { batch ->
                             Text("${batch.files.size} archivos · ${formatBytes(batch.files.sumOf { it.size })}")
@@ -987,6 +1141,52 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun acceptSharedIntent(incoming: Intent?) {
+        if (incoming?.action !in listOf(Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE)) return
+        val uris = runCatching {
+            val supplied: List<*> = when (incoming?.action) {
+                Intent.ACTION_SEND -> listOfNotNull(incoming.getParcelableExtra<android.os.Parcelable>(Intent.EXTRA_STREAM))
+                else -> incoming?.getParcelableArrayListExtra<android.os.Parcelable>(Intent.EXTRA_STREAM).orEmpty()
+            }
+            supplied.map { it as? Uri ?: throw IllegalArgumentException("Archivo compartido no válido") }.ifEmpty {
+                val clips = incoming?.clipData
+                if (clips == null) emptyList() else (0 until clips.itemCount).mapNotNull { clips.getItemAt(it).uri }
+            }.distinct()
+        }.getOrDefault(emptyList())
+        // Only content grants from the system share flow are accepted from exported intents.
+        if (uris.isNotEmpty() && uris.size <= 64 && uris.all { it.scheme == "content" }) {
+            session.shared.value = session.shared.value + SharedSelection(uris, session.pair.value?.retryPeer())
+            preferences.edit().putBoolean("share_copy_pending", true).apply()
+            if (session.busy.value) session.message.value = "Archivos compartidos esperando copia. Se prepararán al terminar la operación actual; aún no están guardados en la cola. Mantén esta pantalla abierta hasta terminar la copia."
+            runCatching { ActiveTransfer.retainSources(applicationContext, uris) }.onFailure {
+                session.message.value = "Mantén esta pantalla abierta hasta que los archivos estén guardados en la cola."
+            }
+        } else session.message.value = "Comparte entre 1 y 64 archivos desde una aplicación que permita leerlos."
+        consumedLaunchShare = true
+        setIntent(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_MAIN))
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        acceptSharedIntent(intent)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("share_consumed", consumedLaunchShare)
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        session.visible.value = true
+    }
+
+    override fun onPause() {
+        session.visible.value = false
+        super.onPause()
     }
 
     override fun onDestroy() {
